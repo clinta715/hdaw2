@@ -1,4 +1,8 @@
 pub mod buffer;
+pub mod clap_scanner;
+pub mod clap_host;
+pub mod clap_instance;
+pub mod clap_effect;
 pub mod effects;
 pub mod engine;
 pub mod mixer;

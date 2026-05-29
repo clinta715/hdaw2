@@ -98,12 +98,12 @@ impl HdawApp {
                     let auto_points: Vec<Vec<crate::project::automation::AutomationPoint>> = handle
                         .automation_lanes.iter().map(|l| l.points.clone()).collect();
                     let fx: Vec<SerializedEffect> = handle.fx_chain.iter().map(|inst| {
-                        let pv: Vec<f32> = inst.effect.parameter_info().iter()
-                            .map(|p| inst.effect.parameter_value(p.id))
+                        let pv: Vec<f32> = inst.parameter_info().iter()
+                            .map(|p| inst.parameter_value(p.id))
                             .collect();
                         SerializedEffect {
                             name: inst.name.clone(),
-                            effect_type: inst.effect_type,
+                            effect_type: inst.effect_type.clone(),
                             bypass: inst.is_bypassed(),
                             param_values: pv,
                         }
@@ -191,14 +191,14 @@ impl HdawApp {
             }
 
             for sfx in &track.fx_chain {
-                let mut effect = create_effect(sfx.effect_type);
+                let mut effect = create_effect(sfx.effect_type.clone());
                 for (i, val) in sfx.param_values.iter().enumerate() {
                     if let Some(info) = effect.parameter_info().get(i) {
                         effect.set_parameter(info.id, *val);
                     }
                 }
                 effect.reset(self.engine.transport.sample_rate());
-                let instance = EffectInstance::new(sfx.name.clone(), sfx.effect_type, effect);
+                let instance = EffectInstance::new_builtin(sfx.name.clone(), sfx.effect_type.clone(), effect);
                 instance.set_bypass(sfx.bypass);
                 handle.add_effect(instance);
             }

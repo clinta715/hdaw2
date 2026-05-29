@@ -29,6 +29,15 @@ Two parallel data models must be manually kept in sync:
 | `AtomicBool` | mute, solo, bypass | `Ordering::Acquire`/`Release` |
 | `AtomicU64` | position frames, packed loop region | audio reads, UI writes |
 
+### CLAP Plugin Hosting Architecture
+- **Scanner** (`audio/clap_scanner.rs`): Discovers `.clap` plugin files in OS-standard directories, loads entry points via `clack_host::PluginEntry::load()`, extracts `PluginDescriptor` metadata (name, id, features, is_instrument)
+- **Host** (`audio/clap_host.rs`): Implements `HostHandlers` for `clack_host`, provides `HdawClapHost` with logging via `tracing`
+- **Plugin State** (`audio/clap_instance.rs`): `ClapPluginState` holds plugin metadata, parameter info/values, bypass state. Parameters bridged to HDAW's `AtomicU32` pattern for lock-free audio thread access
+- **Effect Adapter** (`audio/clap_effect.rs`): `ClapEffectAdapter` wraps a `ClapPluginState` behind `Mutex` for thread safety. Currently a pass-through placeholder for audio processing (N1.8 will implement actual CLAP `process()` calls)
+- **EffectKind enum** in `dsp_effect.rs`: `EffectInstance.kind` is either `BuiltIn(Box<dyn DspEffect>)` or `Clap(Mutex<ClapEffectAdapter>)`. All `EffectInstance` methods (`parameter_info`, `parameter_value`, `set_parameter`, `is_bypassed`) dispatch based on variant
+- **Transport**: Play/Pause/Stop — `pause()` preserves position, `stop()` resets to zero. `Space` = play/pause toggle
+- **EffectType** has a `Clap { plugin_id, path }` variant for serialized CLAP plugin references
+
 ### Transport Architecture
 - `Transport.playing: AtomicBool` — play/pause/stop via `play()`, `pause()`, `stop()`
 - **Play** sets `playing=true`
@@ -102,6 +111,10 @@ These are `thread_local! RefCell<Vec<f32>>` that grow on first use but stabilize
 | `audio/stream.rs` | 147 | build_stream, mix_tracks, name_audio_thread, scratch buffers |
 | `audio/process.rs` | 103 | Per-track audio processing (automation → clips → FX) |
 | `audio/transport.rs` | 77 | Transport: play/pause/stop, packed loop region, position |
+| `audio/clap_scanner.rs` | 100 | CLAP plugin discovery in OS-standard directories |
+| `audio/clap_host.rs` | 47 | HDAW CLAP host handlers (logging, lifecycle) |
+| `audio/clap_instance.rs` | 75 | ClapPluginState: plugin metadata, parameter bridge |
+| `audio/clap_effect.rs` | 44 | ClapEffectAdapter: Mutex-wrapped plugin processing stub |
 | `audio/mixer.rs` | 43 | Master bus volume + peak metering |
 | `audio/effects/` | ~540 | 5 effects (Gain, EQ, Delay, Reverb, Compressor) + traits + factory |
 | `dsp/biquad.rs` | 89 | Shared biquad filter math |

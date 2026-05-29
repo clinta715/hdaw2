@@ -59,13 +59,13 @@ fn remove_point(tracks: &mut [TrackHandle], project: &mut Project, track_index: 
 }
 
 fn recreate_effect(serialized: &crate::project::track::SerializedEffect) -> EffectInstance {
-    let effect = create_effect(serialized.effect_type);
+    let effect = create_effect(serialized.effect_type.clone());
     for (i, val) in serialized.param_values.iter().enumerate() {
         if let Some(info) = effect.parameter_info().get(i) {
             effect.set_parameter(info.id, *val);
         }
     }
-    let inst = EffectInstance::new(serialized.name.clone(), serialized.effect_type, effect);
+    let inst = EffectInstance::new_builtin(serialized.name.clone(), serialized.effect_type.clone(), effect);
     inst.set_bypass(serialized.bypass);
     inst
 }

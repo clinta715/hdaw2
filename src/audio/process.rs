@@ -93,7 +93,16 @@ pub fn process_track(
     // Apply FX chain: each effect processes the track mix in place
     for instance in handle.fx_chain.iter_mut() {
         if !instance.is_bypassed() {
-            instance.effect.process(&mut mix_l, &mut mix_r, sample_rate);
+            match &mut instance.kind {
+                crate::audio::effects::dsp_effect::EffectKind::BuiltIn(effect) => {
+                    effect.process(&mut mix_l, &mut mix_r, sample_rate);
+                }
+                crate::audio::effects::dsp_effect::EffectKind::Clap(adapter) => {
+                    if let Ok(mut a) = adapter.try_lock() {
+                        a.process(&mut mix_l, &mut mix_r, sample_rate);
+                    }
+                }
+            }
         }
     }
 

@@ -15,5 +15,6 @@ pub fn create_effect(etype: EffectType) -> Box<dyn DspEffect> {
         EffectType::Compressor => Box::new(compressor::CompressorEffect::new()),
         EffectType::Reverb => Box::new(reverb::ReverbEffect::new()),
         EffectType::Delay => Box::new(delay::DelayEffect::new()),
+        EffectType::Clap { .. } => panic!("CLAP effects must be created via ClapEffectAdapter, not create_effect"),
     }
 }

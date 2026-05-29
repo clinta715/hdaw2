@@ -32,11 +32,11 @@ fn read_fx_chain(app: &HdawApp, track_idx: usize) -> (Vec<FxData>, String) {
     let Some(track) = tracks.get(track_idx) else { return (Vec::new(), name) };
     let data = track.fx_chain.iter().map(|inst| FxData {
         type_name: format!("{:?}", inst.effect_type),
-        etype: inst.effect_type,
+        etype: inst.effect_type.clone(),
         bypass: inst.is_bypassed(),
-        params: inst.effect.parameter_info().iter().map(|p| ParamData {
+        params: inst.parameter_info().iter().map(|p| ParamData {
             id: p.id, name: p.name.clone(),
-            value: inst.effect.parameter_value(p.id),
+            value: inst.parameter_value(p.id),
             min: p.min_value, max: p.max_value,
         }).collect(),
     }).collect();
@@ -55,7 +55,7 @@ fn write_param(app: &mut HdawApp, track_idx: usize, effect_idx: usize, param_id:
     if let Ok(ts) = app.engine.tracks.lock() {
         if let Some(t) = ts.get(track_idx) {
             if let Some(inst) = t.fx_chain.get(effect_idx) {
-                inst.effect.set_parameter(param_id, value);
+                inst.set_parameter(param_id, value);
             }
         }
     }
@@ -65,11 +65,11 @@ fn remove_effect(app: &mut HdawApp, track_idx: usize, effect_idx: usize) {
     let serialized = if let Ok(mut ts) = app.engine.tracks.lock() {
         let serialized = ts.get(track_idx).and_then(|t| {
             t.fx_chain.get(effect_idx).map(|inst| {
-                let pv: Vec<f32> = inst.effect.parameter_info().iter()
-                    .map(|p| inst.effect.parameter_value(p.id)).collect();
+                let pv: Vec<f32> = inst.parameter_info().iter()
+                    .map(|p| inst.parameter_value(p.id)).collect();
                 crate::project::track::SerializedEffect {
                     name: inst.name.clone(),
-                    effect_type: inst.effect_type,
+                    effect_type: inst.effect_type.clone(),
                     bypass: inst.is_bypassed(),
                     param_values: pv,
                 }
@@ -92,7 +92,7 @@ fn remove_effect(app: &mut HdawApp, track_idx: usize, effect_idx: usize) {
 }
 
 fn add_effect(app: &mut HdawApp, track_idx: usize, name: &str, etype: EffectType) {
-    let instance = EffectInstance::new(name.to_string(), etype, create_effect(etype));
+    let instance = EffectInstance::new_builtin(name.to_string(), etype.clone(), create_effect(etype.clone()));
     let effect_index;
     let pv;
     if let Ok(mut ts) = app.engine.tracks.lock() {
@@ -100,8 +100,8 @@ fn add_effect(app: &mut HdawApp, track_idx: usize, name: &str, etype: EffectType
             effect_index = t.fx_chain.len();
             t.add_effect(instance);
             pv = t.fx_chain.last().map(|inst| {
-                inst.effect.parameter_info().iter()
-                    .map(|p| inst.effect.parameter_value(p.id)).collect()
+                inst.parameter_info().iter()
+                    .map(|p| inst.parameter_value(p.id)).collect()
             }).unwrap_or_default();
         } else { return; }
     } else { return; }
@@ -153,9 +153,9 @@ pub fn render(ctx: &Context, app: &mut HdawApp) {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, (0.0, 0.0))
             .show(ctx, |ui| {
-                for &(name, etype) in &EFFECT_TYPES {
-                    if ui.button(name).clicked() {
-                        add_effect(app, track_idx, name, etype);
+                for (name, etype) in &EFFECT_TYPES {
+                    if ui.button(*name).clicked() {
+                        add_effect(app, track_idx, name, etype.clone());
                         ui.close_menu();
                     }
                 }
