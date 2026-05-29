@@ -23,14 +23,14 @@ pub fn render(ctx: &Context, state: &mut MixerPanelState, track_ui: &[TrackUiSta
             egui::ScrollArea::horizontal()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    draw_master(ui, state);
-
-                    ui.separator();
-
-                    for (i, tui) in track_ui.iter().enumerate() {
-                        draw_channel(ui, i, tui);
+                    ui.horizontal(|ui| {
+                        draw_master(ui, state);
                         ui.separator();
-                    }
+                        for (i, tui) in track_ui.iter().enumerate() {
+                            draw_channel(ui, i, tui);
+                            ui.separator();
+                        }
+                    });
                 });
         });
 }

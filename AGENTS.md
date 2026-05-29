@@ -146,6 +146,7 @@ When adding new timeline rendering or interaction code:
 - Don't add dependencies not already in `Cargo.toml` without approval
 - Don't use `FileDialog::directory()` — use `initial_directory(path.clone())` (takes `PathBuf`, not `&PathBuf`)
 - Don't create compile-time constants for layout values that should be runtime-configurable
+- Don't remove the `ui.horizontal()` wrapper in `mixer_panel::render` — mixer channels (master + tracks) must be laid out side-by-side, not stacked vertically
 
 ## Key Dependencies
 - egui/eframe 0.30 — UI
