@@ -31,7 +31,7 @@ impl ClipHandle {
         }
     }
 
-    pub fn new_midi(clip_id: Uuid, notes: Vec<MidiNote>, length: u64) -> Self {
+    pub fn new_midi(clip_id: Uuid, notes: Vec<MidiNote>, length: u64, sample_rate: u32) -> Self {
         Self {
             clip_id,
             position_frames: AtomicU64::new(0),
@@ -40,7 +40,7 @@ impl ClipHandle {
             gain: Arc::new(AtomicU32::new(f32::to_bits(1.0))),
             audio_data: Arc::new(Vec::new()),
             channels: 0,
-            sample_rate: 44100,
+            sample_rate,
             midi_notes: notes,
         }
     }

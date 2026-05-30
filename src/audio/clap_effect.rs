@@ -3,7 +3,10 @@ use crate::audio::clap_instance::ClapPluginState;
 use crate::audio::effects::parameter::{ParamId, ParameterInfo};
 use clack_extensions::note_ports::PluginNotePorts;
 use clack_extensions::params::{ParamInfoBuffer, PluginParams};
-use clack_host::events::io::{InputEvents, OutputEvents};
+use clack_host::events::event_types::ParamValueEvent;
+use clack_host::events::io::{EventBuffer, InputEvents, OutputEvents};
+use clack_host::events::Pckn;
+use clack_host::utils::{ClapId, Cookie};
 use clack_host::prelude::*;
 use clack_host::process::audio_buffers::{
     AudioPortBuffer, AudioPortBufferType, AudioPorts, InputChannel,
@@ -11,22 +14,34 @@ use clack_host::process::audio_buffers::{
 use std::cell::RefCell;
 use std::ffi::CString;
 use std::path::Path;
+use std::sync::Mutex;
 
 thread_local! {
     static SCRATCH_IN_L: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
     static SCRATCH_IN_R: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
     static SCRATCH_OUT_L: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
     static SCRATCH_OUT_R: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
+    static COMBINED_EVENTS: RefCell<EventBuffer> = RefCell::new(EventBuffer::with_capacity(256));
 }
 
 pub struct ClapEffectAdapter {
     state: ClapPluginState,
     #[allow(dead_code)]
     entry: &'static PluginEntry,
+    instance: Option<PluginInstance<HdawClapHost>>,
     audio_processor: Option<PluginAudioProcessor<HdawClapHost>>,
     input_ports: Option<Box<AudioPorts>>,
     output_ports: Option<Box<AudioPorts>>,
     pub has_note_input: bool,
+    pending_params: Mutex<Vec<(u32, f64)>>,
+}
+
+unsafe impl Send for ClapEffectAdapter {}
+
+impl Drop for ClapEffectAdapter {
+    fn drop(&mut self) {
+        self.deactivate();
+    }
 }
 
 impl ClapEffectAdapter {
@@ -103,17 +118,17 @@ impl ClapEffectAdapter {
             .activate(|_, _| (), config)
             .map_err(|e| format!("Failed to activate: {:?}", e))?;
 
-        drop(instance);
-
         let processor = PluginAudioProcessor::from(stopped);
 
         Ok(Self {
             state,
             entry,
+            instance: Some(instance),
             audio_processor: Some(processor),
             input_ports: Some(Box::new(AudioPorts::with_capacity(2, 1))),
             output_ports: Some(Box::new(AudioPorts::with_capacity(2, 1))),
             has_note_input,
+            pending_params: Mutex::new(Vec::new()),
         })
     }
 
@@ -133,8 +148,11 @@ impl ClapEffectAdapter {
         self.state.parameter_value(id)
     }
 
-    pub fn set_parameter(&self, id: ParamId, value: f32) {
+    pub fn set_parameter(&mut self, id: ParamId, value: f32) {
         self.state.set_parameter(id, value);
+        if let Ok(mut pending) = self.pending_params.lock() {
+            pending.push((id as u32, value as f64));
+        }
     }
 
     pub fn is_bypassed(&self) -> bool {
@@ -145,19 +163,29 @@ impl ClapEffectAdapter {
         self.state.set_bypass(val);
     }
 
-    pub fn process(&mut self, input_l: &mut [f32], input_r: &mut [f32], _sample_rate: u32) {
+    pub fn deactivate(&mut self) {
+        if let Some(instance) = &mut self.instance {
+            if let Some(processor) = self.audio_processor.take() {
+                if let PluginAudioProcessor::Stopped(stopped) = processor {
+                    instance.deactivate(stopped);
+                }
+            }
+        }
+    }
+
+    pub fn process(&mut self, input_l: &mut [f32], input_r: &mut [f32], sample_rate: u32) {
         let empty = InputEvents::empty();
-        self.process_inner(input_l, input_r, _sample_rate, &empty);
+        self.process_inner(input_l, input_r, sample_rate, &empty);
     }
 
     pub fn process_with_events(
         &mut self,
         input_l: &mut [f32],
         input_r: &mut [f32],
-        _sample_rate: u32,
+        sample_rate: u32,
         events: &InputEvents,
     ) {
-        self.process_inner(input_l, input_r, _sample_rate, events);
+        self.process_inner(input_l, input_r, sample_rate, events);
     }
 
     fn process_inner(
@@ -187,61 +215,86 @@ impl ClapEffectAdapter {
         };
 
         SCRATCH_IN_L.with(|sl| {
-            SCRATCH_IN_R.with(|sr| {
-                SCRATCH_OUT_L.with(|sol| {
-                    SCRATCH_OUT_R.with(|sor| {
-                        let mut in_l_buf = sl.borrow_mut();
-                        let mut in_r_buf = sr.borrow_mut();
-                        let mut out_l_buf = sol.borrow_mut();
-                        let mut out_r_buf = sor.borrow_mut();
+        SCRATCH_IN_R.with(|sr| {
+        SCRATCH_OUT_L.with(|sol| {
+        SCRATCH_OUT_R.with(|sor| {
+        let mut in_l_buf = sl.borrow_mut();
+        let mut in_r_buf = sr.borrow_mut();
+        let mut out_l_buf = sol.borrow_mut();
+        let mut out_r_buf = sor.borrow_mut();
 
-                        in_l_buf.clear();
-                        in_l_buf.extend_from_slice(input_l);
-                        in_r_buf.clear();
-                        in_r_buf.extend_from_slice(input_r);
-                        out_l_buf.clear();
-                        out_l_buf.resize(frames, 0.0);
-                        out_r_buf.clear();
-                        out_r_buf.resize(frames, 0.0);
+        in_l_buf.clear();
+        in_l_buf.extend_from_slice(input_l);
+        in_r_buf.clear();
+        in_r_buf.extend_from_slice(input_r);
+        out_l_buf.clear();
+        out_l_buf.resize(frames, 0.0);
+        out_r_buf.clear();
+        out_r_buf.resize(frames, 0.0);
 
-                        let audio_inputs = i_ports.with_input_buffers([AudioPortBuffer {
-                            latency: 0,
-                            channels: AudioPortBufferType::f32_input_only(
-                                [in_l_buf.as_mut_slice(), in_r_buf.as_mut_slice()]
-                                    .into_iter()
-                                    .map(|b| InputChannel::variable(b)),
-                            ),
-                        }]);
+        let audio_inputs = i_ports.with_input_buffers([AudioPortBuffer {
+            latency: 0,
+            channels: AudioPortBufferType::f32_input_only(
+                [in_l_buf.as_mut_slice(), in_r_buf.as_mut_slice()]
+                    .into_iter()
+                    .map(|b| InputChannel::variable(b)),
+            ),
+        }]);
 
-                        let mut audio_outputs =
-                            o_ports.with_output_buffers([AudioPortBuffer {
-                                latency: 0,
-                                channels: AudioPortBufferType::f32_output_only(
-                                    [out_l_buf.as_mut_slice(), out_r_buf.as_mut_slice()]
-                                        .into_iter(),
-                                ),
-                            }]);
+        let mut audio_outputs =
+            o_ports.with_output_buffers([AudioPortBuffer {
+                latency: 0,
+                channels: AudioPortBufferType::f32_output_only(
+                    [out_l_buf.as_mut_slice(), out_r_buf.as_mut_slice()]
+                        .into_iter(),
+                ),
+            }]);
 
-                        let mut output_events = OutputEvents::void();
+        let mut output_events = OutputEvents::void();
 
-                        if let Err(e) = started.process(
-                            &audio_inputs,
-                            &mut audio_outputs,
-                            input_events,
-                            &mut output_events,
-                            None,
-                            None,
-                        ) {
-                            tracing::warn!("CLAP process error: {:?}", e);
-                            return;
-                        }
+        COMBINED_EVENTS.with(|ceb| {
+            let mut combined = ceb.borrow_mut();
+            combined.clear();
 
-                        let written = frames.min(out_l_buf.len());
-                        input_l[..written].copy_from_slice(&out_l_buf[..written]);
-                        input_r[..written].copy_from_slice(&out_r_buf[..written]);
-                    })
-                })
-            })
+            // Copy all input events into combined buffer
+            for event in input_events.iter() {
+                combined.push(event);
+            }
+
+            // Add pending param changes (non-blocking in audio thread)
+            if let Ok(mut pending) = self.pending_params.try_lock() {
+                let pckn = Pckn::new(0u8, 0u8, 0u8, 0u8);
+                for &(id, value) in pending.iter() {
+                    let ev = ParamValueEvent::new(
+                        0,
+                        ClapId::from(id),
+                        pckn,
+                        value,
+                        Cookie::default(),
+                    );
+                    combined.push(&ev);
+                }
+                pending.clear();
+            }
+
+            combined.sort();
+
+            let events = combined.as_input();
+            if let Err(e) = started.process(
+                &audio_inputs,
+                &mut audio_outputs,
+                &events,
+                &mut output_events,
+                None,
+                None,
+            ) {
+                tracing::warn!("CLAP process error: {:?}", e);
+            }
         });
+
+        let written = frames.min(out_l_buf.len());
+        input_l[..written].copy_from_slice(&out_l_buf[..written]);
+        input_r[..written].copy_from_slice(&out_r_buf[..written]);
+        });});});});
     }
 }

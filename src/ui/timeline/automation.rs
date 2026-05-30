@@ -177,11 +177,13 @@ pub fn add_point_to_lane(
 ) -> Option<crate::project::automation::AutomationPoint> {
     let point = crate::project::automation::AutomationPoint { time_frames, value };
     lane.add_point(time_frames, value);
+    lane.dirty = true;
     Some(point)
 }
 
 pub fn remove_point(lane: &mut AutomationLane, point_idx: usize) {
     if point_idx < lane.points.len() {
         lane.points.remove(point_idx);
+        lane.dirty = true;
     }
 }

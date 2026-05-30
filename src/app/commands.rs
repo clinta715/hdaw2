@@ -8,10 +8,13 @@ use std::sync::atomic::Ordering;
 impl HdawApp {
     pub fn update_clip_position(&mut self, track_index: usize, clip_id: uuid::Uuid, new_position: u64) {
         if let Some(track) = self.project.tracks.get_mut(track_index) {
-            if let Some(clip) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Audio(a) if a.id == clip_id)) {
-                if let ClipKind::Audio(audio_clip) = clip {
-                    audio_clip.position_frames = new_position;
+            for clip in track.clips.iter_mut() {
+                match clip {
+                    ClipKind::Audio(a) if a.id == clip_id => a.position_frames = new_position,
+                    ClipKind::Midi(m) if m.id == clip_id => m.position_frames = new_position,
+                    _ => continue,
                 }
+                break;
             }
         }
         if let Ok(tracks) = self.engine.tracks.lock() {
@@ -25,12 +28,20 @@ impl HdawApp {
 
     pub fn update_clip_trim(&mut self, track_index: usize, clip_id: uuid::Uuid, position: Option<u64>, offset: Option<u64>, length: Option<u64>) {
         if let Some(track) = self.project.tracks.get_mut(track_index) {
-            if let Some(clip) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Audio(a) if a.id == clip_id)) {
-                if let ClipKind::Audio(audio_clip) = clip {
-                    if let Some(p) = position { audio_clip.position_frames = p; }
-                    if let Some(o) = offset { audio_clip.offset_frames = o; }
-                    if let Some(l) = length { audio_clip.length_frames = l; }
+            for clip in track.clips.iter_mut() {
+                match clip {
+                    ClipKind::Audio(a) if a.id == clip_id => {
+                        if let Some(p) = position { a.position_frames = p; }
+                        if let Some(o) = offset { a.offset_frames = o; }
+                        if let Some(l) = length { a.length_frames = l; }
+                    }
+                    ClipKind::Midi(m) if m.id == clip_id => {
+                        if let Some(p) = position { m.position_frames = p; }
+                        if let Some(l) = length { m.length_frames = l; }
+                    }
+                    _ => continue,
                 }
+                break;
             }
         }
         if let Ok(tracks) = self.engine.tracks.lock() {
@@ -150,14 +161,20 @@ impl HdawApp {
         let mut track = crate::project::track::Track::new(name);
         track.color = track_ui.color;
 
-        self.track_ui.push(track_ui);
+        self.track_ui.push(track_ui.clone());
         self.engine.add_track(handle);
-        self.project.add_track(track);
+        self.project.add_track(track.clone());
 
         let new_index = self.track_ui.len() - 1;
         self.selected_track = Some(new_index);
         self.effect_editor_state.selected_track = Some(new_index);
         self.effect_editor_state.show_editor = true;
+
+        self.undo_state.push(UndoCommand::AddTrack {
+            track_index: new_index,
+            track,
+            track_ui,
+        });
     }
 
     pub fn add_blank_track(&mut self) {
@@ -179,13 +196,19 @@ impl HdawApp {
         let mut track = crate::project::track::Track::new(name);
         track.color = track_ui.color;
 
-        self.track_ui.push(track_ui);
+        self.track_ui.push(track_ui.clone());
         self.engine.add_track(handle);
-        self.project.add_track(track);
+        self.project.add_track(track.clone());
 
         let new_index = self.track_ui.len() - 1;
         self.selected_track = Some(new_index);
         self.effect_editor_state.selected_track = Some(new_index);
+
+        self.undo_state.push(UndoCommand::AddTrack {
+            track_index: new_index,
+            track,
+            track_ui,
+        });
     }
 
     pub fn add_midi_note(&mut self, track_index: usize, clip_id: uuid::Uuid, note: crate::project::midi_note::MidiNote) {
@@ -198,14 +221,25 @@ impl HdawApp {
         if let Ok(mut tracks) = self.engine.tracks.lock() {
             if let Some(handle) = tracks.get_mut(track_index) {
                 if let Some(ch) = handle.clips.iter_mut().find(|c| c.clip_id == clip_id) {
-                    ch.midi_notes.push(note);
+                    ch.midi_notes.push(note.clone());
                     ch.midi_notes.sort_by_key(|n| n.start_frame);
                 }
             }
         }
+        self.undo_state.push(UndoCommand::AddMidiNote {
+            track_index,
+            clip_id,
+            note,
+        });
     }
 
     pub fn remove_midi_note(&mut self, track_index: usize, clip_id: uuid::Uuid, note_idx: usize) {
+        let note = self.project.tracks.get(track_index).and_then(|track| {
+            track.clips.iter().find_map(|c| match c {
+                ClipKind::Midi(m) if m.id == clip_id => m.notes.get(note_idx).cloned(),
+                _ => None,
+            })
+        });
         if let Some(track) = self.project.tracks.get_mut(track_index) {
             if let Some(ClipKind::Midi(clip)) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Midi(m) if m.id == clip_id)) {
                 if note_idx < clip.notes.len() {
@@ -222,6 +256,14 @@ impl HdawApp {
                 }
             }
         }
+        if let Some(note) = note {
+            self.undo_state.push(UndoCommand::RemoveMidiNote {
+                track_index,
+                clip_id,
+                note,
+                note_index: note_idx,
+            });
+        }
     }
 
     pub fn add_midi_clip(&mut self, track_index: usize, position_frames: u64, length_frames: u64) {
@@ -234,14 +276,16 @@ impl HdawApp {
             notes: Vec::new(),
             color: [0x8a, 0x2b, 0xe2],
         };
+        let clip = ClipKind::Midi(midi_clip);
 
         if let Some(track) = self.project.tracks.get_mut(track_index) {
-            track.add_clip(ClipKind::Midi(midi_clip));
+            track.add_clip(clip.clone());
         }
 
         if let Ok(mut tracks) = self.engine.tracks.lock() {
             if let Some(handle) = tracks.get_mut(track_index) {
-                let clip_handle = ClipHandle::new_midi(clip_id, Vec::new(), length_frames);
+                let sr = self.engine.transport.sample_rate();
+                let clip_handle = ClipHandle::new_midi(clip_id, Vec::new(), length_frames, sr);
                 clip_handle.set_position(position_frames);
                 handle.add_clip(clip_handle);
             }
@@ -250,6 +294,11 @@ impl HdawApp {
         if let Some(tui) = self.track_ui.get_mut(track_index) {
             tui.color = [0x2a, 0x1a, 0x3a];
         }
+
+        self.undo_state.push(UndoCommand::AddMidiClip {
+            track_index,
+            clip,
+        });
     }
 
     pub fn delete_track(&mut self, track_index: usize) {
@@ -258,8 +307,16 @@ impl HdawApp {
         }
 
         let track = self.project.tracks.get(track_index).cloned();
+        let track_ui = self.track_ui.get(track_index).cloned();
 
-        if let Some(track) = track {
+        // Remove from engine first to keep dual-model sync atomic
+        if let Ok(mut tracks) = self.engine.tracks.lock() {
+            if track_index < tracks.len() {
+                tracks.remove(track_index);
+            }
+        }
+
+        if let Some(track) = &track {
             for clip in &track.clips {
                 let pool_clip = crate::project::pool::PoolClip::from_clip(clip.clone());
                 self.project.audio_pool.push(pool_clip);
@@ -267,12 +324,6 @@ impl HdawApp {
         }
 
         self.project.remove_track(track_index);
-
-        if let Ok(mut tracks) = self.engine.tracks.lock() {
-            if track_index < tracks.len() {
-                tracks.remove(track_index);
-            }
-        }
 
         if track_index < self.track_ui.len() {
             self.track_ui.remove(track_index);
@@ -302,6 +353,14 @@ impl HdawApp {
             if !found {
                 self.timeline_state.selected_clip_id = None;
             }
+        }
+
+        if let (Some(track), Some(track_ui)) = (track, track_ui) {
+            self.undo_state.push(UndoCommand::DeleteTrack {
+                track_index,
+                track,
+                track_ui,
+            });
         }
     }
 

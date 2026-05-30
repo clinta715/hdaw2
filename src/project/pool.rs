@@ -11,14 +11,10 @@ pub struct PoolClip {
 
 impl PoolClip {
     pub fn from_clip(clip: ClipKind) -> Self {
-        let name = match &clip {
-            ClipKind::Audio(a) => a.name.clone(),
-            ClipKind::Midi(m) => m.name.clone(),
+        let (id, name) = match &clip {
+            ClipKind::Audio(a) => (a.id, a.name.clone()),
+            ClipKind::Midi(m) => (m.id, m.name.clone()),
         };
-        Self {
-            id: Uuid::new_v4(),
-            name,
-            clip,
-        }
+        Self { id, name, clip }
     }
 }

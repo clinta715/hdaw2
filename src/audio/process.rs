@@ -32,6 +32,7 @@ pub fn process_track(
     pos: usize,
     frames: usize,
     sample_rate: u32,
+    seek_occurred: bool,
 ) {
     let pos_frames = pos as u64;
     let manual_vol = f32::from_bits(handle.volume.load(Ordering::Acquire));
@@ -80,12 +81,26 @@ pub fn process_track(
                         for note in &clip.midi_notes {
                             let note_start = clip_start + note.start_frame;
                             let note_end = note_start + note.duration;
-                            if note_start >= buf_start && note_start < buf_end {
-                                let offset = (note_start - buf_start) as u32;
+
+                            // On seek, kill voices that were playing before the jump
+                            if seek_occurred && note_start < buf_start {
+                                let pckn = Pckn::new(0u8, 0u8, note.pitch, 0u8);
+                                buf.push(&NoteOffEvent::new(0, pckn, 0.0));
+                            }
+
+                            // Send NoteOn if the note is active in this buffer
+                            if note_end > buf_start && note_start < buf_end {
+                                let offset = if note_start < buf_start {
+                                    0
+                                } else {
+                                    (note_start - buf_start) as u32
+                                };
                                 let pckn = Pckn::new(0u8, 0u8, note.pitch, 0u8);
                                 let vel = note.velocity as f64 / 127.0;
                                 buf.push(&NoteOnEvent::new(offset, pckn, vel));
                             }
+
+                            // Send NoteOff when the note ends within this buffer
                             if note_end >= buf_start && note_end < buf_end {
                                 let offset = (note_end - buf_start) as u32;
                                 let pckn = Pckn::new(0u8, 0u8, note.pitch, 0u8);

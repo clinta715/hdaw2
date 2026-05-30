@@ -43,19 +43,42 @@ fn read_fx_chain(app: &HdawApp, track_idx: usize) -> (Vec<FxData>, String) {
     (data, name)
 }
 
+fn engine_fx_to_serialized(inst: &EffectInstance) -> crate::project::track::SerializedEffect {
+    let pv: Vec<f32> = inst.parameter_info().iter()
+        .map(|p| inst.parameter_value(p.id)).collect();
+    crate::project::track::SerializedEffect {
+        name: inst.name.clone(),
+        effect_type: inst.effect_type.clone(),
+        bypass: inst.is_bypassed(),
+        param_values: pv,
+    }
+}
+
 fn write_bypass(app: &mut HdawApp, track_idx: usize, effect_idx: usize, bypass: bool) {
     if let Ok(mut ts) = app.engine.tracks.lock() {
         if let Some(t) = ts.get_mut(track_idx) {
             t.set_effect_bypass(effect_idx, bypass);
         }
     }
+    if let Some(track) = app.project.tracks.get_mut(track_idx) {
+        if let Some(fx) = track.fx_chain.get_mut(effect_idx) {
+            fx.bypass = bypass;
+        }
+    }
 }
 
 fn write_param(app: &mut HdawApp, track_idx: usize, effect_idx: usize, param_id: u32, value: f32) {
-    if let Ok(ts) = app.engine.tracks.lock() {
-        if let Some(t) = ts.get(track_idx) {
-            if let Some(inst) = t.fx_chain.get(effect_idx) {
+    if let Ok(mut ts) = app.engine.tracks.lock() {
+        if let Some(t) = ts.get_mut(track_idx) {
+            if let Some(inst) = t.fx_chain.get_mut(effect_idx) {
                 inst.set_parameter(param_id, value);
+            }
+        }
+    }
+    if let Some(track) = app.project.tracks.get_mut(track_idx) {
+        if let Some(fx) = track.fx_chain.get_mut(effect_idx) {
+            if let Some(pv) = fx.param_values.get_mut(param_id as usize - 1) {
+                *pv = value;
             }
         }
     }
@@ -83,6 +106,11 @@ fn remove_effect(app: &mut HdawApp, track_idx: usize, effect_idx: usize) {
         None
     };
     if let Some(s) = serialized {
+        if let Some(track) = app.project.tracks.get_mut(track_idx) {
+            if effect_idx < track.fx_chain.len() {
+                track.fx_chain.remove(effect_idx);
+            }
+        }
         app.undo_state.push(crate::app::undo::UndoCommand::RemoveEffect {
             track_index: track_idx,
             effect_index: effect_idx,
@@ -94,26 +122,22 @@ fn remove_effect(app: &mut HdawApp, track_idx: usize, effect_idx: usize) {
 fn add_builtin_effect(app: &mut HdawApp, track_idx: usize, name: &str, etype: EffectType) {
     let instance = EffectInstance::new_builtin(name.to_string(), etype.clone(), create_effect(etype.clone()));
     let effect_index;
-    let pv;
+    let serialized;
     if let Ok(mut ts) = app.engine.tracks.lock() {
         if let Some(t) = ts.get_mut(track_idx) {
             effect_index = t.fx_chain.len();
             t.add_effect(instance);
-            pv = t.fx_chain.last().map(|inst| {
-                inst.parameter_info().iter()
-                    .map(|p| inst.parameter_value(p.id)).collect()
-            }).unwrap_or_default();
+            serialized = t.fx_chain.last().map(|inst| engine_fx_to_serialized(inst)).unwrap();
         } else { return; }
     } else { return; }
+    if let Some(track) = app.project.tracks.get_mut(track_idx) {
+        let idx = effect_index.min(track.fx_chain.len());
+        track.fx_chain.insert(idx, serialized.clone());
+    }
     app.undo_state.push(crate::app::undo::UndoCommand::AddEffect {
         track_index: track_idx,
         effect_index,
-        serialized: crate::project::track::SerializedEffect {
-            name: name.to_string(),
-            effect_type: etype,
-            bypass: false,
-            param_values: pv,
-        },
+        serialized,
     });
 }
 
@@ -132,26 +156,22 @@ fn add_clap_effect(app: &mut HdawApp, track_idx: usize, desc: &crate::audio::cla
     };
     let instance = EffectInstance::new_clap(desc.name.clone(), etype.clone(), adapter);
     let effect_index;
-    let pv;
+    let serialized;
     if let Ok(mut ts) = app.engine.tracks.lock() {
         if let Some(t) = ts.get_mut(track_idx) {
             effect_index = t.fx_chain.len();
             t.add_effect(instance);
-            pv = t.fx_chain.last().map(|inst| {
-                inst.parameter_info().iter()
-                    .map(|p| inst.parameter_value(p.id)).collect()
-            }).unwrap_or_default();
+            serialized = t.fx_chain.last().map(|inst| engine_fx_to_serialized(inst)).unwrap();
         } else { return; }
     } else { return; }
+    if let Some(track) = app.project.tracks.get_mut(track_idx) {
+        let idx = effect_index.min(track.fx_chain.len());
+        track.fx_chain.insert(idx, serialized.clone());
+    }
     app.undo_state.push(crate::app::undo::UndoCommand::AddEffect {
         track_index: track_idx,
         effect_index,
-        serialized: crate::project::track::SerializedEffect {
-            name: desc.name.clone(),
-            effect_type: etype,
-            bypass: false,
-            param_values: pv,
-        },
+        serialized,
     });
 }
 

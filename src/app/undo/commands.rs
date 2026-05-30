@@ -105,11 +105,13 @@ pub fn apply_undo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoC
     match *cmd {
         UndoCommand::MoveClip { track_index, clip_id, old_position, .. } => {
             if let Some(track) = project.tracks.get_mut(track_index) {
-                if let Some(ClipKind::Audio(clip)) = track.clips.iter_mut().find(|c| match c {
-                    ClipKind::Audio(a) => a.id == clip_id,
-                    ClipKind::Midi(_) => false,
-                }) {
-                    clip.position_frames = old_position;
+                for clip in track.clips.iter_mut() {
+                    match clip {
+                        ClipKind::Audio(a) if a.id == clip_id => a.position_frames = old_position,
+                        ClipKind::Midi(m) if m.id == clip_id => m.position_frames = old_position,
+                        _ => continue,
+                    }
+                    break;
                 }
             }
             if let Some(handle) = tracks.get_mut(track_index) {
@@ -120,12 +122,18 @@ pub fn apply_undo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoC
         }
         UndoCommand::TrimClip { track_index, clip_id, old_offset, old_length, .. } => {
             if let Some(track) = project.tracks.get_mut(track_index) {
-                if let Some(ClipKind::Audio(clip)) = track.clips.iter_mut().find(|c| match c {
-                    ClipKind::Audio(a) => a.id == clip_id,
-                    ClipKind::Midi(_) => false,
-                }) {
-                    clip.offset_frames = old_offset;
-                    clip.length_frames = old_length;
+                for clip in track.clips.iter_mut() {
+                    match clip {
+                        ClipKind::Audio(a) if a.id == clip_id => {
+                            a.offset_frames = old_offset;
+                            a.length_frames = old_length;
+                        }
+                        ClipKind::Midi(m) if m.id == clip_id => {
+                            m.length_frames = old_length;
+                        }
+                        _ => continue,
+                    }
+                    break;
                 }
             }
             if let Some(handle) = tracks.get_mut(track_index) {
@@ -145,14 +153,24 @@ pub fn apply_undo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoC
                     ClipKind::Audio(a) => a.id == clip_id,
                     ClipKind::Midi(m) => m.id == clip_id,
                 }).unwrap_or(track.clips.len());
-                if let ClipKind::Audio(audio_clip) = clip {
-                    if let Some(buf) = audio_clip.buffer.as_ref() {
-                        let ch = ClipHandle::new(audio_clip.id, (**buf.samples()).clone(), buf.channels(), buf.sample_rate());
-                        ch.set_position(audio_clip.position_frames);
-                        ch.set_offset(audio_clip.offset_frames);
-                        ch.set_length(audio_clip.length_frames);
+                match clip {
+                    ClipKind::Audio(audio_clip) => {
+                        if let Some(buf) = audio_clip.buffer.as_ref() {
+                            let ch = ClipHandle::new(audio_clip.id, (**buf.samples()).clone(), buf.channels(), buf.sample_rate());
+                            ch.set_position(audio_clip.position_frames);
+                            ch.set_offset(audio_clip.offset_frames);
+                            ch.set_length(audio_clip.length_frames);
+                            if let Some(handle) = tracks.get_mut(track_index) {
+                                let eng_pos = handle.find_clip_by_id(audio_clip.id).unwrap_or(handle.clips.len());
+                                handle.clips.insert(eng_pos, ch);
+                            }
+                        }
+                    }
+                    ClipKind::Midi(midi_clip) => {
+                        let ch = ClipHandle::new_midi(midi_clip.id, midi_clip.notes.clone(), midi_clip.length_frames, sample_rate);
+                        ch.set_position(midi_clip.position_frames);
                         if let Some(handle) = tracks.get_mut(track_index) {
-                            let eng_pos = handle.find_clip_by_id(audio_clip.id).unwrap_or(handle.clips.len());
+                            let eng_pos = handle.find_clip_by_id(midi_clip.id).unwrap_or(handle.clips.len());
                             handle.clips.insert(eng_pos, ch);
                         }
                     }
@@ -186,6 +204,47 @@ pub fn apply_undo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoC
         UndoCommand::AutomationRemovePoint { track_index, lane_index, point_index: _, ref point } => {
             insert_point(tracks, project, track_index, lane_index, point);
         }
+        UndoCommand::AddMidiNote { track_index, clip_id, ref note } => {
+            if let Some(track) = project.tracks.get_mut(track_index) {
+                if let Some(ClipKind::Midi(clip)) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Midi(m) if m.id == clip_id)) {
+                    clip.notes.retain(|n| n.pitch != note.pitch || n.start_frame != note.start_frame || n.duration != note.duration);
+                }
+            }
+            if let Some(handle) = tracks.get_mut(track_index) {
+                if let Some(ch) = handle.clips.iter_mut().find(|c| c.clip_id == clip_id) {
+                    ch.midi_notes.retain(|n| n.pitch != note.pitch || n.start_frame != note.start_frame || n.duration != note.duration);
+                }
+            }
+        }
+        UndoCommand::RemoveMidiNote { track_index, clip_id, ref note, .. } => {
+            if let Some(track) = project.tracks.get_mut(track_index) {
+                if let Some(ClipKind::Midi(clip)) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Midi(m) if m.id == clip_id)) {
+                    clip.notes.push(note.clone());
+                    clip.notes.sort_by_key(|n| n.start_frame);
+                }
+            }
+            if let Some(handle) = tracks.get_mut(track_index) {
+                if let Some(ch) = handle.clips.iter_mut().find(|c| c.clip_id == clip_id) {
+                    ch.midi_notes.push(note.clone());
+                    ch.midi_notes.sort_by_key(|n| n.start_frame);
+                }
+            }
+        }
+        UndoCommand::AddMidiClip { track_index, ref clip } => {
+            let clip_id = match clip {
+                ClipKind::Audio(a) => a.id,
+                ClipKind::Midi(m) => m.id,
+            };
+            if let Some(track) = project.tracks.get_mut(track_index) {
+                if let Some(pos) = track.clips.iter().position(|c| match c {
+                    ClipKind::Audio(a) => a.id == clip_id,
+                    ClipKind::Midi(m) => m.id == clip_id,
+                }) { track.clips.remove(pos); }
+            }
+            if let Some(handle) = tracks.get_mut(track_index) {
+                if let Some(pos) = handle.find_clip_by_id(clip_id) { handle.clips.remove(pos); }
+            }
+        }
         UndoCommand::AutomationMovePoint { track_index, lane_index, point_index, old_value, .. } => {
             if let Some(handle) = tracks.get_mut(track_index) {
                 if let Some(lane) = handle.automation_lanes.get_mut(lane_index) {
@@ -198,6 +257,7 @@ pub fn apply_undo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoC
                 }
             }
         }
+        UndoCommand::AddTrack { .. } | UndoCommand::DeleteTrack { .. } => {}
     }
 }
 
@@ -205,11 +265,13 @@ pub fn apply_redo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoC
     match *cmd {
         UndoCommand::MoveClip { track_index, clip_id, new_position, .. } => {
             if let Some(track) = project.tracks.get_mut(track_index) {
-                if let Some(ClipKind::Audio(clip)) = track.clips.iter_mut().find(|c| match c {
-                    ClipKind::Audio(a) => a.id == clip_id,
-                    ClipKind::Midi(_) => false,
-                }) {
-                    clip.position_frames = new_position;
+                for clip in track.clips.iter_mut() {
+                    match clip {
+                        ClipKind::Audio(a) if a.id == clip_id => a.position_frames = new_position,
+                        ClipKind::Midi(m) if m.id == clip_id => m.position_frames = new_position,
+                        _ => continue,
+                    }
+                    break;
                 }
             }
             if let Some(handle) = tracks.get_mut(track_index) {
@@ -220,12 +282,18 @@ pub fn apply_redo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoC
         }
         UndoCommand::TrimClip { track_index, clip_id, new_offset, new_length, .. } => {
             if let Some(track) = project.tracks.get_mut(track_index) {
-                if let Some(ClipKind::Audio(clip)) = track.clips.iter_mut().find(|c| match c {
-                    ClipKind::Audio(a) => a.id == clip_id,
-                    ClipKind::Midi(_) => false,
-                }) {
-                    clip.offset_frames = new_offset;
-                    clip.length_frames = new_length;
+                for clip in track.clips.iter_mut() {
+                    match clip {
+                        ClipKind::Audio(a) if a.id == clip_id => {
+                            a.offset_frames = new_offset;
+                            a.length_frames = new_length;
+                        }
+                        ClipKind::Midi(m) if m.id == clip_id => {
+                            m.length_frames = new_length;
+                        }
+                        _ => continue,
+                    }
+                    break;
                 }
             }
             if let Some(handle) = tracks.get_mut(track_index) {
@@ -269,6 +337,56 @@ pub fn apply_redo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoC
         UndoCommand::AutomationRemovePoint { track_index, lane_index, point_index: _, ref point } => {
             remove_point(tracks, project, track_index, lane_index, point);
         }
+        UndoCommand::AddMidiNote { track_index, clip_id, ref note } => {
+            if let Some(track) = project.tracks.get_mut(track_index) {
+                if let Some(ClipKind::Midi(clip)) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Midi(m) if m.id == clip_id)) {
+                    clip.notes.push(note.clone());
+                    clip.notes.sort_by_key(|n| n.start_frame);
+                }
+            }
+            if let Some(handle) = tracks.get_mut(track_index) {
+                if let Some(ch) = handle.clips.iter_mut().find(|c| c.clip_id == clip_id) {
+                    ch.midi_notes.push(note.clone());
+                    ch.midi_notes.sort_by_key(|n| n.start_frame);
+                }
+            }
+        }
+        UndoCommand::RemoveMidiNote { track_index, clip_id, ref note, .. } => {
+            if let Some(track) = project.tracks.get_mut(track_index) {
+                if let Some(ClipKind::Midi(clip)) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Midi(m) if m.id == clip_id)) {
+                    clip.notes.retain(|n| n.pitch != note.pitch || n.start_frame != note.start_frame || n.duration != note.duration);
+                }
+            }
+            if let Some(handle) = tracks.get_mut(track_index) {
+                if let Some(ch) = handle.clips.iter_mut().find(|c| c.clip_id == clip_id) {
+                    ch.midi_notes.retain(|n| n.pitch != note.pitch || n.start_frame != note.start_frame || n.duration != note.duration);
+                }
+            }
+        }
+        UndoCommand::AddMidiClip { track_index, ref clip } => {
+            let clip_id = match clip {
+                ClipKind::Audio(a) => a.id,
+                ClipKind::Midi(m) => m.id,
+            };
+            let pos = project.tracks.get(track_index).and_then(|t| {
+                t.clips.iter().position(|c| match c {
+                    ClipKind::Audio(a) => a.id == clip_id,
+                    ClipKind::Midi(m) => m.id == clip_id,
+                })
+            }).unwrap_or(0);
+            if let Some(track) = project.tracks.get_mut(track_index) {
+                let idx = pos.min(track.clips.len());
+                track.clips.insert(idx, clip.clone());
+            }
+            if let Some(handle) = tracks.get_mut(track_index) {
+                if let ClipKind::Midi(midi_clip) = clip {
+                    let ch = ClipHandle::new_midi(midi_clip.id, midi_clip.notes.clone(), midi_clip.length_frames, sample_rate);
+                    ch.set_position(midi_clip.position_frames);
+                    let idx = pos.min(handle.clips.len());
+                    handle.clips.insert(idx, ch);
+                }
+            }
+        }
         UndoCommand::AutomationMovePoint { track_index, lane_index, point_index, new_value, .. } => {
             if let Some(handle) = tracks.get_mut(track_index) {
                 if let Some(lane) = handle.automation_lanes.get_mut(lane_index) {
@@ -281,5 +399,6 @@ pub fn apply_redo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoC
                 }
             }
         }
+        UndoCommand::AddTrack { .. } | UndoCommand::DeleteTrack { .. } => {}
     }
 }

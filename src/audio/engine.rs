@@ -119,8 +119,9 @@ pub fn audio_callback(
     let frames = data.len() / 2;
     let pos = transport.position_frames() as usize;
     let sample_rate = transport.sample_rate();
+    let seek_occurred = transport.seek_occurred.swap(false, Ordering::Acquire);
 
-    stream::mix_tracks(&mut track_list, data, pos, frames, sample_rate, master_bus);
+    stream::mix_tracks(&mut track_list, data, pos, frames, sample_rate, master_bus, seek_occurred);
     transport.advance_frames(frames as u64);
     check_loop_wrap(transport);
 }

@@ -62,7 +62,7 @@ fn draw_pool_panel(ui: &mut egui::Ui, state: &mut AudioPoolPanelState, app: &mut
             };
             Some((p.id, p.name.clone(), secs))
         }).collect();
-        drop(());
+        let _ = ();
 
         for (id, name, secs) in pool_clips {
             let is_dragging = state.dragging_clip_id == Some(id);

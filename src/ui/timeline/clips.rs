@@ -14,7 +14,7 @@ pub fn draw(
 ) {
     match clip {
         ClipKind::Audio(audio_clip) => draw_audio(painter, lane_rect, audio_clip, state, sample_rate),
-        ClipKind::Midi(midi_clip) => draw_midi(painter, lane_rect, midi_clip, state),
+        ClipKind::Midi(midi_clip) => draw_midi(painter, lane_rect, midi_clip, state, sample_rate),
     }
 }
 
@@ -95,8 +95,9 @@ fn draw_midi(
     lane_rect: &Rect,
     clip: &MidiClip,
     state: &TimelineState,
+    sample_rate: u32,
 ) {
-    let sr = 44100.0;
+    let sr = sample_rate as f64;
     let pps = state.pixels_per_second;
     let scroll_x = state.scroll_x;
 

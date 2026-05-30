@@ -52,41 +52,55 @@ impl EffectInstance {
         }
     }
 
+    fn lock_clap(&self) -> std::sync::MutexGuard<'_, ClapEffectAdapter> {
+        match &self.kind {
+            EffectKind::Clap(adapter) => adapter.lock().unwrap_or_else(|e| e.into_inner()),
+            EffectKind::BuiltIn(_) => panic!("not a CLAP effect"),
+        }
+    }
+
+    fn lock_clap_mut(&mut self) -> std::sync::MutexGuard<'_, ClapEffectAdapter> {
+        match &mut self.kind {
+            EffectKind::Clap(adapter) => adapter.lock().unwrap_or_else(|e| e.into_inner()),
+            EffectKind::BuiltIn(_) => panic!("not a CLAP effect"),
+        }
+    }
+
     pub fn is_bypassed(&self) -> bool {
         if self.bypass.load(Ordering::Acquire) {
             return true;
         }
         match &self.kind {
-            EffectKind::Clap(adapter) => adapter.lock().unwrap().is_bypassed(),
+            EffectKind::Clap(_) => self.lock_clap().is_bypassed(),
             EffectKind::BuiltIn(_) => false,
         }
     }
 
     pub fn set_bypass(&self, val: bool) {
         self.bypass.store(val, Ordering::Release);
-        if let EffectKind::Clap(adapter) = &self.kind {
-            adapter.lock().unwrap().set_bypass(val);
+        if let EffectKind::Clap(_) = &self.kind {
+            self.lock_clap().set_bypass(val);
         }
     }
 
     pub fn parameter_info(&self) -> Vec<ParameterInfo> {
         match &self.kind {
             EffectKind::BuiltIn(effect) => effect.parameter_info().to_vec(),
-            EffectKind::Clap(adapter) => adapter.lock().unwrap().parameter_info(),
+            EffectKind::Clap(_) => self.lock_clap().parameter_info(),
         }
     }
 
     pub fn parameter_value(&self, id: ParamId) -> f32 {
         match &self.kind {
             EffectKind::BuiltIn(effect) => effect.parameter_value(id),
-            EffectKind::Clap(adapter) => adapter.lock().unwrap().parameter_value(id),
+            EffectKind::Clap(_) => self.lock_clap().parameter_value(id),
         }
     }
 
-    pub fn set_parameter(&self, id: ParamId, value: f32) {
-        match &self.kind {
+    pub fn set_parameter(&mut self, id: ParamId, value: f32) {
+        match &mut self.kind {
             EffectKind::BuiltIn(effect) => effect.set_parameter(id, value),
-            EffectKind::Clap(adapter) => adapter.lock().unwrap().set_parameter(id, value),
+            EffectKind::Clap(_) => self.lock_clap_mut().set_parameter(id, value),
         }
     }
 }

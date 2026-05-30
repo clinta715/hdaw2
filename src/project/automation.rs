@@ -14,6 +14,8 @@ pub struct AutomationLane {
     pub param_id: u32,
     pub param_name: String,
     pub points: Vec<AutomationPoint>,
+    #[serde(skip)]
+    pub dirty: bool,
 }
 
 impl AutomationLane {
@@ -22,6 +24,7 @@ impl AutomationLane {
             param_id,
             param_name,
             points: Vec::new(),
+            dirty: false,
         }
     }
 

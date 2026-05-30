@@ -12,6 +12,24 @@ use egui_file_dialog::FileDialog;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
+fn resample(samples: &[f32], channels: u16, from_sr: u32, to_sr: u32) -> Vec<f32> {
+    let from_frames = samples.len() / channels as usize;
+    let to_frames = (from_frames as f64 * to_sr as f64 / from_sr as f64).round() as usize;
+    let ratio = from_frames as f64 / to_frames as f64;
+    let mut out = Vec::with_capacity(to_frames * channels as usize);
+    for i in 0..to_frames {
+        let src_pos = i as f64 * ratio;
+        let src_idx = src_pos as usize;
+        let frac = src_pos - src_idx as f64;
+        for ch in 0..channels as usize {
+            let a = samples.get(src_idx * channels as usize + ch).copied().unwrap_or(0.0);
+            let b = samples.get((src_idx + 1) * channels as usize + ch).copied().unwrap_or(0.0);
+            out.push(a + (b - a) * frac as f32);
+        }
+    }
+    out
+}
+
 impl HdawApp {
     pub fn import_audio(&mut self) {
         let mut dialog = FileDialog::new();
@@ -45,7 +63,15 @@ impl HdawApp {
     }
 
     pub fn load_audio_file(&mut self, path: &str) -> Result<(), String> {
-        let (samples, channels, sample_rate) = crate::utils::load_wav_file(path)?;
+        let (samples, channels, file_sr) = crate::utils::load_wav_file(path)?;
+
+        let engine_sr = self.engine.transport.sample_rate();
+        let samples = if file_sr != engine_sr {
+            resample(&samples, channels, file_sr, engine_sr)
+        } else {
+            samples
+        };
+        let sample_rate = engine_sr;
 
         let file_name = std::path::Path::new(path)
             .file_stem()
@@ -197,6 +223,8 @@ impl HdawApp {
         self.new_project();
         self.project = project;
 
+        let mut engine_tracks = Vec::with_capacity(self.project.tracks.len());
+
         for track in &self.project.tracks {
             let mut handle = TrackHandle::new();
 
@@ -221,6 +249,7 @@ impl HdawApp {
                             midi_clip.id,
                             midi_clip.notes.clone(),
                             midi_clip.length_frames,
+                            self.engine.transport.sample_rate(),
                         );
                         clip_handle.set_position(midi_clip.position_frames);
                         handle.add_clip(clip_handle);
@@ -283,7 +312,12 @@ impl HdawApp {
             }
 
             self.track_ui.push(track_ui);
-            self.engine.add_track(handle);
+            engine_tracks.push(handle);
+        }
+
+        // Atomically swap the entire engine track list to avoid a silent gap
+        if let Ok(mut tracks) = self.engine.tracks.lock() {
+            *tracks = engine_tracks;
         }
 
         self.current_path = Some(PathBuf::from(path));

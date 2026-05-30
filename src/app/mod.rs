@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::Arc;
 use uuid::Uuid;
 
+#[derive(Clone)]
 pub struct TrackUiState {
     pub name: String,
     pub color: [u8; 3],
@@ -146,7 +147,50 @@ impl HdawApp {
         let sr = self.engine.transport.sample_rate();
         if let Ok(mut tracks) = self.engine.tracks.lock() {
             if let Some(cmd) = self.undo_state.undo() {
-                undo::apply_undo(&mut self.project, &mut tracks, cmd, sr);
+                match cmd {
+                    undo::UndoCommand::AddTrack { track_index, .. } => {
+                        if *track_index < tracks.len() {
+                            // Deactivate CLAP effects before removing
+                            for fx in &mut tracks[*track_index].fx_chain {
+                                if let crate::audio::effects::dsp_effect::EffectKind::Clap(adapter) = &fx.kind {
+                                    if let Ok(mut a) = adapter.lock() {
+                                        a.deactivate();
+                                    }
+                                }
+                            }
+                            tracks.remove(*track_index);
+                        }
+                        if *track_index < self.project.tracks.len() {
+                            self.project.tracks.remove(*track_index);
+                        }
+                        if *track_index < self.track_ui.len() {
+                            self.track_ui.remove(*track_index);
+                        }
+                        self.selected_track = None;
+                        self.effect_editor_state.selected_track = None;
+                    }
+                    undo::UndoCommand::DeleteTrack { track_index, track, track_ui } => {
+                        let handle = crate::project::track::TrackHandle::new();
+                        // Restore param values from project track
+                        handle.volume.store(f32::to_bits(track.volume), std::sync::atomic::Ordering::Release);
+                        handle.pan.store(f32::to_bits(track.pan), std::sync::atomic::Ordering::Release);
+                        handle.mute.store(track.mute, std::sync::atomic::Ordering::Release);
+                        handle.solo.store(track.solo, std::sync::atomic::Ordering::Release);
+                        let idx = (*track_index).min(tracks.len());
+                        tracks.insert(idx, handle);
+                        self.project.tracks.insert(idx, track.clone());
+                        self.track_ui.insert(idx, track_ui.clone());
+                        // Remove from pool
+                        for clip in &track.clips {
+                            let clip_id = match clip {
+                                crate::project::clip::ClipKind::Audio(a) => a.id,
+                                crate::project::clip::ClipKind::Midi(m) => m.id,
+                            };
+                            self.project.audio_pool.retain(|p| p.id != clip_id);
+                        }
+                    }
+                    _ => undo::apply_undo(&mut self.project, &mut tracks, cmd, sr),
+                }
             }
         }
     }
@@ -155,7 +199,44 @@ impl HdawApp {
         let sr = self.engine.transport.sample_rate();
         if let Ok(mut tracks) = self.engine.tracks.lock() {
             if let Some(cmd) = self.undo_state.redo() {
-                undo::apply_redo(&mut self.project, &mut tracks, cmd, sr);
+                match cmd {
+                    undo::UndoCommand::AddTrack { track_index, track, track_ui } => {
+                        let handle = crate::project::track::TrackHandle::new();
+                        handle.volume.store(f32::to_bits(track.volume), std::sync::atomic::Ordering::Release);
+                        handle.pan.store(f32::to_bits(track.pan), std::sync::atomic::Ordering::Release);
+                        handle.mute.store(track.mute, std::sync::atomic::Ordering::Release);
+                        handle.solo.store(track.solo, std::sync::atomic::Ordering::Release);
+                        let idx = (*track_index).min(tracks.len());
+                        tracks.insert(idx, handle);
+                        self.project.tracks.insert(idx, track.clone());
+                        self.track_ui.insert(idx, track_ui.clone());
+                    }
+                    undo::UndoCommand::DeleteTrack { track_index, .. } => {
+                        if *track_index < tracks.len() {
+                            for fx in &mut tracks[*track_index].fx_chain {
+                                if let crate::audio::effects::dsp_effect::EffectKind::Clap(adapter) = &fx.kind {
+                                    if let Ok(mut a) = adapter.lock() {
+                                        a.deactivate();
+                                    }
+                                }
+                            }
+                            tracks.remove(*track_index);
+                        }
+                        if *track_index < self.project.tracks.len() {
+                            let track = self.project.tracks.remove(*track_index);
+                            for clip in &track.clips {
+                                let pool_clip = crate::project::pool::PoolClip::from_clip(clip.clone());
+                                self.project.audio_pool.push(pool_clip);
+                            }
+                        }
+                        if *track_index < self.track_ui.len() {
+                            self.track_ui.remove(*track_index);
+                        }
+                        self.selected_track = None;
+                        self.effect_editor_state.selected_track = None;
+                    }
+                    _ => undo::apply_redo(&mut self.project, &mut tracks, cmd, sr),
+                }
             }
         }
     }

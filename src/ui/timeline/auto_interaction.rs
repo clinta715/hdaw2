@@ -8,13 +8,20 @@ pub fn sync_automation_to_project(app: &mut HdawApp) {
         if let Ok(tracks) = app.engine.tracks.lock() {
             if let Some(handle) = tracks.get(track_idx) {
                 for (li, lane) in handle.automation_lanes.iter().enumerate() {
-                    if let Some(track) = app.project.tracks.get_mut(track_idx) {
-                        if let Some(pl) = track.automation_lanes.get_mut(li) {
-                            if pl.points != lane.points {
+                    if lane.dirty {
+                        if let Some(track) = app.project.tracks.get_mut(track_idx) {
+                            if let Some(pl) = track.automation_lanes.get_mut(li) {
                                 pl.points.clone_from(&lane.points);
                             }
                         }
                     }
+                }
+            }
+        }
+        if let Ok(mut tracks) = app.engine.tracks.lock() {
+            if let Some(handle) = tracks.get_mut(track_idx) {
+                for lane in &mut handle.automation_lanes {
+                    lane.dirty = false;
                 }
             }
         }
@@ -51,6 +58,7 @@ pub fn handle_automation_interaction(response: &Response, rect: &Rect, app: &mut
                         );
                         if let Some(pt) = lane.points.get_mut(pi) {
                             pt.value = value;
+                            lane.dirty = true;
                         }
                     }
                 }

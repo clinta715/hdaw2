@@ -102,6 +102,7 @@ pub fn mix_tracks(
     frames: usize,
     sample_rate: u32,
     master_bus: &Arc<MasterBus>,
+    seek_occurred: bool,
 ) {
     SCRATCH_L.with(|sl| {
         SCRATCH_R.with(|sr| {
@@ -121,7 +122,7 @@ pub fn mix_tracks(
                     handle.peak_right.store(0, Ordering::Release);
                     continue;
                 }
-                process::process_track(handle, &mut out_l, &mut out_r, pos, frames, sample_rate);
+                process::process_track(handle, &mut out_l, &mut out_r, pos, frames, sample_rate, seek_occurred);
             }
 
             master_bus.process(&mut out_l, &mut out_r);

@@ -16,6 +16,7 @@ pub struct Transport {
     sample_rate: AtomicU32,
     pub loop_enabled: AtomicBool,
     loop_region: AtomicU64,
+    pub seek_occurred: AtomicBool,
 }
 
 impl Transport {
@@ -26,6 +27,7 @@ impl Transport {
             sample_rate: AtomicU32::new(sample_rate),
             loop_enabled: AtomicBool::new(false),
             loop_region: AtomicU64::new(pack_loop_region(0, 0)),
+            seek_occurred: AtomicBool::new(false),
         }
     }
 
@@ -57,6 +59,7 @@ impl Transport {
 
     pub fn seek_to_frame(&self, frames: u64) {
         self.position_frames.store(frames, Ordering::Release);
+        self.seek_occurred.store(true, Ordering::Release);
     }
 
     pub fn advance_frames(&self, frames: u64) {

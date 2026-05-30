@@ -1,8 +1,10 @@
 mod commands;
 
+use crate::app::TrackUiState;
 use crate::project::automation::AutomationPoint;
 use crate::project::clip::ClipKind;
-use crate::project::track::SerializedEffect;
+use crate::project::midi_note::MidiNote;
+use crate::project::track::{SerializedEffect, Track};
 
 pub use commands::{apply_undo, apply_redo};
 
@@ -63,6 +65,31 @@ pub enum UndoCommand {
         point_index: usize,
         old_value: f32,
         new_value: f32,
+    },
+    AddMidiNote {
+        track_index: usize,
+        clip_id: uuid::Uuid,
+        note: MidiNote,
+    },
+    RemoveMidiNote {
+        track_index: usize,
+        clip_id: uuid::Uuid,
+        note: MidiNote,
+        note_index: usize,
+    },
+    AddMidiClip {
+        track_index: usize,
+        clip: ClipKind,
+    },
+    AddTrack {
+        track_index: usize,
+        track: Track,
+        track_ui: TrackUiState,
+    },
+    DeleteTrack {
+        track_index: usize,
+        track: Track,
+        track_ui: TrackUiState,
     },
 }
 
