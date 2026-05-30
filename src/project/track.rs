@@ -1,6 +1,6 @@
 use crate::audio::effects::dsp_effect::{EffectInstance, EffectType};
 use crate::project::automation::AutomationLane;
-use crate::project::clip::AudioClip;
+use crate::project::clip::ClipKind;
 use crate::project::clip_handle::ClipHandle;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU32};
@@ -76,7 +76,7 @@ pub struct Track {
     pub pan: f32,
     pub mute: bool,
     pub solo: bool,
-    pub clips: Vec<AudioClip>,
+    pub clips: Vec<ClipKind>,
     pub automation_lanes: Vec<AutomationLane>,
     pub fx_chain: Vec<SerializedEffect>,
 }
@@ -97,7 +97,7 @@ impl Track {
         }
     }
 
-    pub fn add_clip(&mut self, clip: AudioClip) {
+    pub fn add_clip(&mut self, clip: ClipKind) {
         self.clips.push(clip);
     }
 }

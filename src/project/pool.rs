@@ -1,4 +1,4 @@
-use crate::project::clip::AudioClip;
+use crate::project::clip::ClipKind;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -6,14 +6,18 @@ use uuid::Uuid;
 pub struct PoolClip {
     pub id: Uuid,
     pub name: String,
-    pub clip: AudioClip,
+    pub clip: ClipKind,
 }
 
 impl PoolClip {
-    pub fn from_clip(clip: AudioClip) -> Self {
+    pub fn from_clip(clip: ClipKind) -> Self {
+        let name = match &clip {
+            ClipKind::Audio(a) => a.name.clone(),
+            ClipKind::Midi(m) => m.name.clone(),
+        };
         Self {
             id: Uuid::new_v4(),
-            name: clip.name.clone(),
+            name,
             clip,
         }
     }

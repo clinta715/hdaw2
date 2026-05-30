@@ -4,14 +4,15 @@
 
 ### Dual-Model Sync (Critical Architectural Debt)
 Two parallel data models must be manually kept in sync:
-- **Project model** (`Project`, `Track`, `AudioClip`, `AutomationLane`) — serializable, used for save/load and UI display
-- **Engine model** (`TrackHandle`, `ClipHandle`, `EffectInstance`) — real-time, uses atomics, used by audio callback
+- **Project model** (`Project`, `Track`, `ClipKind::Audio(AudioClip) | ClipKind::Midi(MidiClip)`, `AutomationLane`) — serializable, used for save/load and UI display
+- **Engine model** (`TrackHandle`, `ClipHandle.midi_notes: Vec<MidiNote>`, `EffectInstance`) — real-time, uses atomics, used by audio callback
 
 **Every operation that modifies a clip/track/effect must update BOTH models.** The sync is ad-hoc:
-- `app/commands.rs` — `update_clip_position`, `update_clip_trim`, `remove_selected_clip` touch both
-- `app/project_io.rs` — `snapshot_fx_to_project` reads engine → project for serialization
+- `app/commands.rs` — `update_clip_position`, `update_clip_trim`, `remove_selected_clip`, `add_midi_note`, `remove_midi_note` touch both
+- `app/project_io.rs` — `sync_engine_to_project` reads engine → project for serialization (includes MIDI note sync)
 - `ui/timeline/auto_interaction.rs` — `sync_automation_to_project` copies engine auto points → project model
 - `ui/effect_editor/` — reads FX chain state from engine directly (not from project model)
+- MIDI clip editing updates both project `MidiClip.notes` and engine `ClipHandle.midi_notes` atomically for real-time playback
 
 ### Real-Time Audio Thread Rules
 - **NO heap allocations in audio callback.** Use `thread_local!` scratch buffers (`stream.rs`, `process.rs`) that `resize()` instead of allocating new `Vec`.
@@ -33,8 +34,8 @@ Two parallel data models must be manually kept in sync:
 - **Scanner** (`audio/clap_scanner.rs`): Discovers `.clap` plugin files in OS-standard directories, loads entry points via `clack_host::PluginEntry::load()`, extracts `PluginDescriptor` metadata (name, id, features, is_instrument)
 - **Host** (`audio/clap_host.rs`): Implements `HostHandlers` for `clack_host`, provides `HdawClapHost` with logging via `tracing`
 - **Plugin State** (`audio/clap_instance.rs`): `ClapPluginState` holds plugin metadata, parameter info/values, bypass state. Parameters bridged to HDAW's `AtomicU32` pattern for lock-free audio thread access
-- **Effect Adapter** (`audio/clap_effect.rs`): `ClapEffectAdapter` wraps a `ClapPluginState` behind `Mutex` for thread safety. Currently a pass-through placeholder for audio processing (N1.8 will implement actual CLAP `process()` calls)
-- **EffectKind enum** in `dsp_effect.rs`: `EffectInstance.kind` is either `BuiltIn(Box<dyn DspEffect>)` or `Clap(Mutex<ClapEffectAdapter>)`. All `EffectInstance` methods (`parameter_info`, `parameter_value`, `set_parameter`, `is_bypassed`) dispatch based on variant
+- **Effect Adapter** (`audio/clap_effect.rs`): `ClapEffectAdapter` wraps a `ClapPluginState` behind `Mutex` for thread safety. Implements `process()` (pass-through for non-instruments) and `process_with_events()` (sends MIDI NoteOn/NoteOff to CLAP plugin). Detects note-input capability via `PluginNotePorts` extension query at load time.
+- **EffectKind enum** in `dsp_effect.rs`: `EffectInstance.kind` is either `BuiltIn(Box<dyn DspEffect>)` or `Clap(Mutex<ClapEffectAdapter>)`. All `EffectInstance` methods (`parameter_info`, `parameter_value`, `set_parameter`, `is_bypassed`, `has_note_input`) dispatch based on variant
 - **Transport**: Play/Pause/Stop — `pause()` preserves position, `stop()` resets to zero. `Space` = play/pause toggle
 - **EffectType** has a `Clap { plugin_id, path }` variant for serialized CLAP plugin references
 
@@ -53,6 +54,19 @@ Two parallel data models must be manually kept in sync:
 - f32::NAN from empty lane = use manual atomic value
 - Local-override: automation curves don't overwrite atomics; result used locally per buffer
 - Deferred sync: engine edits copied to project model every frame (diff check in `sync_automation_to_project`)
+
+### MIDI Architecture (v0.2.0)
+- **Data model**: `MidiNote` (pitch, velocity, start_frame, duration) + `MidiClip` (id, name, position/length, notes, color)
+- **ClipKind enum**: `ClipKind::Audio(AudioClip) | ClipKind::Midi(MidiClip)` unifies both clip types on the project model
+- **Engine model**: `ClipHandle.midi_notes: Vec<MidiNote>` — separate from audio data, empty for audio clips
+- **Playback**: `process_track()` scans `ClipHandle.midi_notes` in each clip, builds sorted `EventBuffer` of NoteOn/NoteOff, sends to the first note-capable CLAP effect in the FX chain via `process_with_events()`
+- **Instrument detection**: `has_note_input` flag on `EffectInstance`; `ClapEffectAdapter` queries `PluginNotePorts` extension at load time
+- **Instrument slot**: first effect in FX chain with `has_note_input == true`; skipped in standard FX loop
+- **Piano roll**: `ui/piano_roll.rs` — grid editor with note add (left-click), delete (right-click), playhead indicator
+- **Sync**: `add_midi_note` / `remove_midi_note` in `commands.rs` update both project and engine models
+- **Event sorting**: MIDI events sorted by sample offset using `Vec::sort()` on the EventBuffer before dispatch
+- **Default note duration**: 1 beat (computed from BPM * sample rate)
+- **No MIDI recording** or file import/export in Phase 1
 
 ### Effect Parameter Pattern
 - `DspEffect` trait: `process(&mut self)` (mutable DSP) + `Parameterizable` (immutable reads via `ParameterValue`)
@@ -85,45 +99,48 @@ These are `thread_local! RefCell<Vec<f32>>` that grow on first use but stabilize
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `app/mod.rs` | 212 | HdawApp struct, constructor, accessors, `eframe::App::update` |
-| `app/commands.rs` | 203 | Clip/track manipulation ops, pool clip restore |
-| `app/project_io.rs` | 207 | Save/load/new/import, sync_engine_to_project |
+| `app/mod.rs` | 249 | HdawApp struct, constructor, accessors, `eframe::App::update` |
+| `app/commands.rs` | 313 | Clip/track manipulation ops, pool clip restore, MIDI note add/remove |
+| `app/project_io.rs` | 292 | Save/load/new/import, sync_engine_to_project (incl. MIDI note sync) |
 | `app/input.rs` | 158 | Keyboard handling, pending requests, file dialogs |
 | `app/prefs_io.rs` | 34 | Preferences load/save via RON |
-| `app/undo/mod.rs` | 95 | UndoCommand enum, UndoStack |
-| `app/undo/commands.rs` | 219 | apply_undo/apply_redo implementations |
-| `ui/timeline/mod.rs` | 223 | Timeline render, zoom/scroll, grid, track layout |
-| `ui/timeline/clips.rs` | 172 | Clip waveform drawing + drag/trim interaction |
+| `app/undo/mod.rs` | 106 | UndoCommand enum, UndoStack |
+| `app/undo/commands.rs` | 285 | apply_undo/apply_redo implementations |
+| `ui/timeline/mod.rs` | 305 | Timeline render, zoom/scroll, grid, track layout, context menu |
+| `ui/timeline/clips.rs` | 277 | Clip waveform/MIDI drawing + drag/trim/double-click interaction |
 | `ui/timeline/automation.rs` | 171 | Automation curve drawing + point editing helpers |
-| `ui/timeline/interaction.rs` | 172 | Seek, loop, clip, track header interaction handlers |
+| `ui/timeline/interaction.rs` | 206 | Seek, loop, clip, track header interaction handlers |
 | `ui/timeline/auto_interaction.rs` | 133 | Automation point interaction + sync to project |
 | `ui/timeline/ruler.rs` | 121 | Time ruler ticks, labels, loop markers |
 | `ui/timeline/track_headers.rs` | 139 | Track header drawing, mute/solo buttons, hit testing |
 | `ui/timeline/playhead.rs` | 14 | Playhead line drawing |
-| `ui/effect_editor/mod.rs` | 225 | FX chain panel + effect parameter UI |
+| `ui/piano_roll.rs` | 220 | Piano roll grid editor with MIDI note add/delete/playhead |
+| `ui/effect_editor/mod.rs` | 307 | FX chain panel + effect parameter UI |
 | `ui/effect_editor/eq_graph.rs` | 82 | EQ frequency response graph |
 | `ui/preferences.rs` | 206 | Preferences dialog (3 sections: Audio, Project, Timeline/UI) |
-| `ui/toolbar.rs` | 169 | Top toolbar with transport controls, menus |
-| `ui/app_ui.rs` | 136 | Main layout: toolbar, panels, timeline, status bar |
-| `ui/mixer_panel.rs` | 94 | Mixer strip panel (reads TrackUiState atomics directly) |
+| `ui/toolbar.rs` | 169 | Top toolbar with transport controls, menus, "+" dropdown |
+| `ui/app_ui.rs` | 175 | Main layout: toolbar, panels, timeline, status bar, instrument dialog |
+| `ui/mixer_panel.rs` | 94 | Mixer strip panel (VU meter + slider side-by-side) |
 | `ui/audio_pool.rs` | 81 | Audio pool panel for imported files |
 | `audio/engine.rs` | 132 | AudioEngine struct, init, play/pause/stop, rebuild |
 | `audio/stream.rs` | 147 | build_stream, mix_tracks, name_audio_thread, scratch buffers |
-| `audio/process.rs` | 103 | Per-track audio processing (automation → clips → FX) |
+| `audio/process.rs` | 103 | Per-track audio processing (automation → clips → MIDI → FX) |
 | `audio/transport.rs` | 77 | Transport: play/pause/stop, packed loop region, position |
 | `audio/clap_scanner.rs` | 100 | CLAP plugin discovery in OS-standard directories |
 | `audio/clap_host.rs` | 47 | HDAW CLAP host handlers (logging, lifecycle) |
 | `audio/clap_instance.rs` | 75 | ClapPluginState: plugin metadata, parameter bridge |
-| `audio/clap_effect.rs` | 44 | ClapEffectAdapter: Mutex-wrapped plugin processing stub |
+| `audio/clap_effect.rs` | 44 | ClapEffectAdapter: process(), process_with_events(), note-port detection |
 | `audio/mixer.rs` | 43 | Master bus volume + peak metering |
 | `audio/effects/` | ~540 | 5 effects (Gain, EQ, Delay, Reverb, Compressor) + traits + factory |
 | `dsp/biquad.rs` | 89 | Shared biquad filter math |
-| `project/track.rs` | 97 | `TrackHandle` (engine) + `Track` (project) definitions |
+| `project/track.rs` | 97 | `TrackHandle` (engine) + `Track` (project) with `clips: Vec<ClipKind>` |
 | `project/automation.rs` | 61 | `AutomationLane` + `AutomationPoint` |
-| `project/clip.rs` | 76 | `AudioClip` with waveform peaks |
-| `project/clip_handle.rs` | 40 | `ClipHandle` (engine-side) |
+| `project/clip.rs` | 88 | `ClipKind` enum + `AudioClip` with waveform peaks |
+| `project/clip_handle.rs` | 66 | `ClipHandle` (engine-side) with `midi_notes` |
+| `project/midi_clip.rs` | 13 | `MidiClip` struct (position, length, notes, color) |
+| `project/midi_note.rs` | 9 | `MidiNote` struct (pitch, velocity, start_frame, duration) |
 | `project/marker.rs` | 19 | `Marker` definition |
-| `project/pool.rs` | 18 | `AudioPoolEntry` definition |
+| `project/pool.rs` | 18 | `AudioPoolEntry` definition (supports ClipKind) |
 
 ## Common Patterns to Follow
 

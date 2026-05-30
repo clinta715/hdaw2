@@ -91,7 +91,7 @@ fn remove_effect(app: &mut HdawApp, track_idx: usize, effect_idx: usize) {
     }
 }
 
-fn add_effect(app: &mut HdawApp, track_idx: usize, name: &str, etype: EffectType) {
+fn add_builtin_effect(app: &mut HdawApp, track_idx: usize, name: &str, etype: EffectType) {
     let instance = EffectInstance::new_builtin(name.to_string(), etype.clone(), create_effect(etype.clone()));
     let effect_index;
     let pv;
@@ -110,6 +110,44 @@ fn add_effect(app: &mut HdawApp, track_idx: usize, name: &str, etype: EffectType
         effect_index,
         serialized: crate::project::track::SerializedEffect {
             name: name.to_string(),
+            effect_type: etype,
+            bypass: false,
+            param_values: pv,
+        },
+    });
+}
+
+fn add_clap_effect(app: &mut HdawApp, track_idx: usize, desc: &crate::audio::clap_scanner::PluginDescriptor) {
+    let sr = app.engine.transport.sample_rate();
+    let adapter = match crate::audio::clap_effect::ClapEffectAdapter::new_instance(&desc.id, &desc.path, sr) {
+        Ok(a) => a,
+        Err(e) => {
+            app.error_message = Some(format!("Failed to load CLAP plugin {}: {}", desc.name, e));
+            return;
+        }
+    };
+    let etype = EffectType::Clap {
+        plugin_id: desc.id.clone(),
+        path: desc.path.to_string_lossy().into_owned(),
+    };
+    let instance = EffectInstance::new_clap(desc.name.clone(), etype.clone(), adapter);
+    let effect_index;
+    let pv;
+    if let Ok(mut ts) = app.engine.tracks.lock() {
+        if let Some(t) = ts.get_mut(track_idx) {
+            effect_index = t.fx_chain.len();
+            t.add_effect(instance);
+            pv = t.fx_chain.last().map(|inst| {
+                inst.parameter_info().iter()
+                    .map(|p| inst.parameter_value(p.id)).collect()
+            }).unwrap_or_default();
+        } else { return; }
+    } else { return; }
+    app.undo_state.push(crate::app::undo::UndoCommand::AddEffect {
+        track_index: track_idx,
+        effect_index,
+        serialized: crate::project::track::SerializedEffect {
+            name: desc.name.clone(),
             effect_type: etype,
             bypass: false,
             param_values: pv,
@@ -147,17 +185,37 @@ pub fn render(ctx: &Context, app: &mut HdawApp) {
     };
 
     if app.effect_editor_state.show_add_menu {
-        app.effect_editor_state.show_add_menu = false;
         egui::Window::new("Select Effect")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, (0.0, 0.0))
             .show(ctx, |ui| {
+                ui.label("Built-in");
                 for (name, etype) in &EFFECT_TYPES {
                     if ui.button(*name).clicked() {
-                        add_effect(app, track_idx, name, etype.clone());
-                        ui.close_menu();
+                        add_builtin_effect(app, track_idx, name, etype.clone());
+                        app.effect_editor_state.show_add_menu = false;
                     }
+                }
+                if !app.plugin_registry.is_empty() {
+                    ui.separator();
+                    ui.label("CLAP Plugins");
+                    let descriptors = app.plugin_registry.clone();
+                    for desc in &descriptors {
+                        let label = if desc.is_instrument {
+                            format!("{} [instrument]", desc.name)
+                        } else {
+                            desc.name.clone()
+                        };
+                        if ui.button(label).clicked() {
+                            add_clap_effect(app, track_idx, desc);
+                            app.effect_editor_state.show_add_menu = false;
+                        }
+                    }
+                }
+                ui.separator();
+                if ui.button("Cancel").clicked() {
+                    app.effect_editor_state.show_add_menu = false;
                 }
             });
         return;

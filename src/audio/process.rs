@@ -1,11 +1,16 @@
+use crate::audio::effects::dsp_effect::EffectKind;
 use crate::project::automation::{AutomationLane, PARAM_PAN, PARAM_VOLUME};
 use crate::project::track::TrackHandle;
+use clack_host::events::event_types::{NoteOffEvent, NoteOnEvent};
+use clack_host::events::Pckn;
+use clack_host::events::io::EventBuffer;
 use std::cell::RefCell;
 use std::sync::atomic::Ordering;
 
 thread_local! {
     static MIX_L: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
     static MIX_R: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
+    static MIDI_EVENTS: RefCell<EventBuffer> = RefCell::new(EventBuffer::with_capacity(128));
 }
 
 fn automation_value(lanes: &[AutomationLane], param_id: u32, time_frames: u64, fallback: f32) -> f32 {
@@ -51,7 +56,55 @@ pub fn process_track(
     mix_r.clear();
     mix_r.resize(frames, 0.0f32);
 
+    // Find the first note-capable effect (instrument)
+    let inst_idx = handle.fx_chain.iter().position(|e| e.has_note_input);
+
+    // Dispatch MIDI notes and process any instrument on this track
+    if let Some(ii) = inst_idx {
+        if let EffectKind::Clap(adapter) = &handle.fx_chain[ii].kind {
+            if let Ok(mut a) = adapter.try_lock() {
+                MIDI_EVENTS.with(|eb| {
+                    let mut buf = eb.borrow_mut();
+                    buf.clear();
+                    let buf_start = pos as u64;
+                    let buf_end = (pos + frames) as u64;
+                    for clip in &handle.clips {
+                        if clip.midi_notes.is_empty() {
+                            continue;
+                        }
+                        let clip_start = clip.position_frames.load(Ordering::Acquire);
+                        let clip_end = clip_start + clip.length_frames.load(Ordering::Acquire);
+                        if clip_start >= buf_end || clip_end <= buf_start {
+                            continue;
+                        }
+                        for note in &clip.midi_notes {
+                            let note_start = clip_start + note.start_frame;
+                            let note_end = note_start + note.duration;
+                            if note_start >= buf_start && note_start < buf_end {
+                                let offset = (note_start - buf_start) as u32;
+                                let pckn = Pckn::new(0u8, 0u8, note.pitch, 0u8);
+                                let vel = note.velocity as f64 / 127.0;
+                                buf.push(&NoteOnEvent::new(offset, pckn, vel));
+                            }
+                            if note_end >= buf_start && note_end < buf_end {
+                                let offset = (note_end - buf_start) as u32;
+                                let pckn = Pckn::new(0u8, 0u8, note.pitch, 0u8);
+                                buf.push(&NoteOffEvent::new(offset, pckn, 0.0));
+                            }
+                        }
+                    }
+                    buf.sort();
+                    let events = buf.as_input();
+                    a.process_with_events(&mut mix_l, &mut mix_r, sample_rate, &events);
+                });
+            }
+        }
+    }
+
     for clip in &handle.clips {
+        if !clip.midi_notes.is_empty() {
+            continue;
+        }
         let clip_pos = clip.position_frames.load(Ordering::Acquire) as usize;
         let clip_off = clip.offset_frames.load(Ordering::Acquire) as usize;
         let clip_len = clip.length_frames.load(Ordering::Acquire) as usize;
@@ -91,13 +144,16 @@ pub fn process_track(
     }
 
     // Apply FX chain: each effect processes the track mix in place
-    for instance in handle.fx_chain.iter_mut() {
+    for (fi, instance) in handle.fx_chain.iter_mut().enumerate() {
+        if Some(fi) == inst_idx {
+            continue;
+        }
         if !instance.is_bypassed() {
             match &mut instance.kind {
-                crate::audio::effects::dsp_effect::EffectKind::BuiltIn(effect) => {
+                EffectKind::BuiltIn(effect) => {
                     effect.process(&mut mix_l, &mut mix_r, sample_rate);
                 }
-                crate::audio::effects::dsp_effect::EffectKind::Clap(adapter) => {
+                EffectKind::Clap(adapter) => {
                     if let Ok(mut a) = adapter.try_lock() {
                         a.process(&mut mix_l, &mut mix_r, sample_rate);
                     }

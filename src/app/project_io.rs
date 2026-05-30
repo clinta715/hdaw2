@@ -1,13 +1,15 @@
 use crate::app::HdawApp;
+use crate::audio::clap_effect::ClapEffectAdapter;
 use crate::audio::effects::create_effect;
-use crate::audio::effects::dsp_effect::EffectInstance;
+use crate::audio::effects::dsp_effect::{EffectInstance, EffectType};
 use crate::audio::buffer::AudioBuffer;
-use crate::project::clip::AudioClip;
+use crate::project::clip::{AudioClip, ClipKind};
 use crate::project::clip_handle::ClipHandle;
+use crate::project::midi_note::MidiNote;
 use crate::project::track::{SerializedEffect, Track, TrackHandle};
 use crate::project::Project;
 use egui_file_dialog::FileDialog;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
 impl HdawApp {
@@ -56,13 +58,21 @@ impl HdawApp {
         let mut handle = TrackHandle::new();
 
         let buffer = AudioBuffer::from_interleaved(samples, channels, sample_rate);
-        let clip = AudioClip::with_source_path(file_name.clone(), buffer, source_path);
+        let clip_kind = ClipKind::Audio(AudioClip::with_source_path(file_name.clone(), buffer, source_path));
 
-        let buf = match clip.buffer.as_ref() {
-            Some(b) => b,
-            None => return Err("clip buffer missing after import".to_string()),
+        let buf = match &clip_kind {
+            ClipKind::Audio(a) => match a.buffer.as_ref() {
+                Some(b) => b,
+                None => return Err("clip buffer missing after import".to_string()),
+            },
+            ClipKind::Midi(_) => return Err("unexpected midi clip on import".to_string()),
         };
-        let clip_handle = ClipHandle::new(clip.id, (*buf.samples()).to_vec(), channels, sample_rate);
+        let clip_handle = ClipHandle::new(
+            match &clip_kind { ClipKind::Audio(a) => a.id, ClipKind::Midi(_) => unreachable!() },
+            (*buf.samples()).to_vec(),
+            channels,
+            sample_rate,
+        );
         handle.add_clip(clip_handle);
 
         let track_ui = crate::app::TrackUiState {
@@ -80,7 +90,7 @@ impl HdawApp {
         self.engine.add_track(handle);
 
         let mut track = Track::new(file_name);
-        track.add_clip(clip);
+        track.add_clip(clip_kind);
         self.project.add_track(track);
 
         tracing::info!("loaded audio file: {path}");
@@ -88,7 +98,7 @@ impl HdawApp {
     }
 
     pub fn sync_engine_to_project(&mut self) {
-        let snapshot: Vec<(f32, f32, bool, bool, Vec<Vec<crate::project::automation::AutomationPoint>>, Vec<SerializedEffect>)> =
+        let snapshot: Vec<(f32, f32, bool, bool, Vec<Vec<crate::project::automation::AutomationPoint>>, Vec<SerializedEffect>, Vec<(uuid::Uuid, Vec<MidiNote>)>)> =
             self.engine.tracks.lock().ok().map(|tracks| {
                 tracks.iter().map(|handle| {
                     let vol = f32::from_bits(handle.volume.load(Ordering::Acquire));
@@ -108,11 +118,14 @@ impl HdawApp {
                             param_values: pv,
                         }
                     }).collect();
-                    (vol, pan, mute, solo, auto_points, fx)
+                    let clip_notes: Vec<(uuid::Uuid, Vec<MidiNote>)> = handle.clips.iter()
+                        .map(|c| (c.clip_id, c.midi_notes.clone()))
+                        .collect();
+                    (vol, pan, mute, solo, auto_points, fx, clip_notes)
                 }).collect()
             }).unwrap_or_default();
 
-        for (ti, (vol, pan, mute, solo, auto_points, fx)) in snapshot.into_iter().enumerate() {
+        for (ti, (vol, pan, mute, solo, auto_points, fx, clip_notes)) in snapshot.into_iter().enumerate() {
             if let Some(track) = self.project.tracks.get_mut(ti) {
                 track.volume = vol;
                 track.pan = pan;
@@ -126,6 +139,13 @@ impl HdawApp {
                     }
                 }
                 track.fx_chain = fx;
+                for (clip_id, notes) in clip_notes {
+                    if let Some(clip) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Midi(m) if m.id == clip_id)) {
+                        if let ClipKind::Midi(m) = clip {
+                            m.notes = notes;
+                        }
+                    }
+                }
             }
         }
     }
@@ -165,7 +185,12 @@ impl HdawApp {
 
         for track in &mut project.tracks {
             for clip in &mut track.clips {
-                let _ = clip.reload_buffer();
+                match clip {
+                    ClipKind::Audio(audio_clip) => {
+                        let _ = audio_clip.reload_buffer();
+                    }
+                    ClipKind::Midi(_) => {}
+                }
             }
         }
 
@@ -176,29 +201,61 @@ impl HdawApp {
             let mut handle = TrackHandle::new();
 
             for clip in &track.clips {
-                if let Some(buf) = &clip.buffer {
-                    let clip_handle = ClipHandle::new(
-                        clip.id,
-                        (**buf.samples()).to_vec(),
-                        buf.channels(),
-                        buf.sample_rate(),
-                    );
-                    clip_handle.set_position(clip.position_frames);
-                    clip_handle.set_offset(clip.offset_frames);
-                    clip_handle.set_length(clip.length_frames);
-                    handle.add_clip(clip_handle);
+                match clip {
+                    ClipKind::Audio(audio_clip) => {
+                        if let Some(buf) = &audio_clip.buffer {
+                            let clip_handle = ClipHandle::new(
+                                audio_clip.id,
+                                (**buf.samples()).to_vec(),
+                                buf.channels(),
+                                buf.sample_rate(),
+                            );
+                            clip_handle.set_position(audio_clip.position_frames);
+                            clip_handle.set_offset(audio_clip.offset_frames);
+                            clip_handle.set_length(audio_clip.length_frames);
+                            handle.add_clip(clip_handle);
+                        }
+                    }
+                    ClipKind::Midi(midi_clip) => {
+                        let clip_handle = ClipHandle::new_midi(
+                            midi_clip.id,
+                            midi_clip.notes.clone(),
+                            midi_clip.length_frames,
+                        );
+                        clip_handle.set_position(midi_clip.position_frames);
+                        handle.add_clip(clip_handle);
+                    }
                 }
             }
 
             for sfx in &track.fx_chain {
-                let mut effect = create_effect(sfx.effect_type.clone());
-                for (i, val) in sfx.param_values.iter().enumerate() {
-                    if let Some(info) = effect.parameter_info().get(i) {
-                        effect.set_parameter(info.id, *val);
+                let instance = match &sfx.effect_type {
+                    EffectType::Clap { plugin_id, path } => {
+                        let adapter = ClapEffectAdapter::new_instance(
+                            plugin_id,
+                            Path::new(path),
+                            self.engine.transport.sample_rate(),
+                        );
+                        match adapter {
+                            Ok(a) => EffectInstance::new_clap(sfx.name.clone(), sfx.effect_type.clone(), a),
+                            Err(e) => {
+                                tracing::error!("Failed to load CLAP effect {}: {}", plugin_id, e);
+                                continue;
+                            }
+                        }
                     }
-                }
-                effect.reset(self.engine.transport.sample_rate());
-                let instance = EffectInstance::new_builtin(sfx.name.clone(), sfx.effect_type.clone(), effect);
+                    _ => {
+                        let mut effect = create_effect(sfx.effect_type.clone());
+                        for (i, val) in sfx.param_values.iter().enumerate() {
+                            if let Some(info) = effect.parameter_info().get(i) {
+                                effect.set_parameter(info.id, *val);
+                            }
+                        }
+                        effect.reset(self.engine.transport.sample_rate());
+                        let inst = EffectInstance::new_builtin(sfx.name.clone(), sfx.effect_type.clone(), effect);
+                        inst
+                    }
+                };
                 instance.set_bypass(sfx.bypass);
                 handle.add_effect(instance);
             }

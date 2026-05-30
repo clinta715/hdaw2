@@ -1,14 +1,17 @@
 use crate::app::undo::UndoCommand;
 use crate::app::{HdawApp, TrackUiState};
-use crate::project::clip::AudioClip;
+use crate::audio::effects::dsp_effect::{EffectInstance, EffectType};
+use crate::project::clip::{AudioClip, ClipKind};
 use crate::project::clip_handle::ClipHandle;
 use std::sync::atomic::Ordering;
 
 impl HdawApp {
     pub fn update_clip_position(&mut self, track_index: usize, clip_id: uuid::Uuid, new_position: u64) {
         if let Some(track) = self.project.tracks.get_mut(track_index) {
-            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                clip.position_frames = new_position;
+            if let Some(clip) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Audio(a) if a.id == clip_id)) {
+                if let ClipKind::Audio(audio_clip) = clip {
+                    audio_clip.position_frames = new_position;
+                }
             }
         }
         if let Ok(tracks) = self.engine.tracks.lock() {
@@ -22,10 +25,12 @@ impl HdawApp {
 
     pub fn update_clip_trim(&mut self, track_index: usize, clip_id: uuid::Uuid, position: Option<u64>, offset: Option<u64>, length: Option<u64>) {
         if let Some(track) = self.project.tracks.get_mut(track_index) {
-            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                if let Some(p) = position { clip.position_frames = p; }
-                if let Some(o) = offset { clip.offset_frames = o; }
-                if let Some(l) = length { clip.length_frames = l; }
+            if let Some(clip) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Audio(a) if a.id == clip_id)) {
+                if let ClipKind::Audio(audio_clip) = clip {
+                    if let Some(p) = position { audio_clip.position_frames = p; }
+                    if let Some(o) = offset { audio_clip.offset_frames = o; }
+                    if let Some(l) = length { audio_clip.length_frames = l; }
+                }
             }
         }
         if let Ok(tracks) = self.engine.tracks.lock() {
@@ -46,7 +51,10 @@ impl HdawApp {
         };
         for ti in 0..self.project.tracks.len() {
             if let Some(track) = self.project.tracks.get(ti) {
-                if let Some(ci) = track.clips.iter().position(|c| c.id == clip_id) {
+                if let Some(ci) = track.clips.iter().position(|c| match c {
+                    ClipKind::Audio(a) => a.id == clip_id,
+                    ClipKind::Midi(m) => m.id == clip_id,
+                }) {
                     let clip = track.clips[ci].clone();
                     if let Some(track) = self.project.tracks.get_mut(ti) {
                         track.clips.remove(ci);
@@ -109,6 +117,49 @@ impl HdawApp {
         self.effect_editor_state.selected_track = Some(track_index);
     }
 
+    pub fn add_instrument_track(&mut self, desc: &crate::audio::clap_scanner::PluginDescriptor) {
+        let name = format!("{}", desc.name);
+        let sr = self.engine.transport.sample_rate();
+        let adapter = match crate::audio::clap_effect::ClapEffectAdapter::new_instance(&desc.id, &desc.path, sr) {
+            Ok(a) => a,
+            Err(e) => {
+                self.error_message = Some(format!("Failed to load instrument {}: {}", desc.name, e));
+                return;
+            }
+        };
+        let etype = EffectType::Clap {
+            plugin_id: desc.id.clone(),
+            path: desc.path.to_string_lossy().into_owned(),
+        };
+        let instance = EffectInstance::new_clap(desc.name.clone(), etype, adapter);
+
+        let mut handle = crate::project::track::TrackHandle::new();
+        handle.add_effect(instance);
+
+        let track_ui = TrackUiState {
+            name: name.clone(),
+            color: [0x2a, 0x1a, 0x2a],
+            volume: handle.volume.clone(),
+            pan: handle.pan.clone(),
+            mute: handle.mute.clone(),
+            solo: handle.solo.clone(),
+            peak_left: handle.peak_left.clone(),
+            peak_right: handle.peak_right.clone(),
+        };
+
+        let mut track = crate::project::track::Track::new(name);
+        track.color = track_ui.color;
+
+        self.track_ui.push(track_ui);
+        self.engine.add_track(handle);
+        self.project.add_track(track);
+
+        let new_index = self.track_ui.len() - 1;
+        self.selected_track = Some(new_index);
+        self.effect_editor_state.selected_track = Some(new_index);
+        self.effect_editor_state.show_editor = true;
+    }
+
     pub fn add_blank_track(&mut self) {
         let track_count = self.project.tracks.len();
         let name = format!("Track {}", track_count + 1);
@@ -135,6 +186,70 @@ impl HdawApp {
         let new_index = self.track_ui.len() - 1;
         self.selected_track = Some(new_index);
         self.effect_editor_state.selected_track = Some(new_index);
+    }
+
+    pub fn add_midi_note(&mut self, track_index: usize, clip_id: uuid::Uuid, note: crate::project::midi_note::MidiNote) {
+        if let Some(track) = self.project.tracks.get_mut(track_index) {
+            if let Some(ClipKind::Midi(clip)) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Midi(m) if m.id == clip_id)) {
+                clip.notes.push(note.clone());
+                clip.notes.sort_by_key(|n| n.start_frame);
+            }
+        }
+        if let Ok(mut tracks) = self.engine.tracks.lock() {
+            if let Some(handle) = tracks.get_mut(track_index) {
+                if let Some(ch) = handle.clips.iter_mut().find(|c| c.clip_id == clip_id) {
+                    ch.midi_notes.push(note);
+                    ch.midi_notes.sort_by_key(|n| n.start_frame);
+                }
+            }
+        }
+    }
+
+    pub fn remove_midi_note(&mut self, track_index: usize, clip_id: uuid::Uuid, note_idx: usize) {
+        if let Some(track) = self.project.tracks.get_mut(track_index) {
+            if let Some(ClipKind::Midi(clip)) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Midi(m) if m.id == clip_id)) {
+                if note_idx < clip.notes.len() {
+                    clip.notes.remove(note_idx);
+                }
+            }
+        }
+        if let Ok(mut tracks) = self.engine.tracks.lock() {
+            if let Some(handle) = tracks.get_mut(track_index) {
+                if let Some(ch) = handle.clips.iter_mut().find(|c| c.clip_id == clip_id) {
+                    if note_idx < ch.midi_notes.len() {
+                        ch.midi_notes.remove(note_idx);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn add_midi_clip(&mut self, track_index: usize, position_frames: u64, length_frames: u64) {
+        let clip_id = uuid::Uuid::new_v4();
+        let midi_clip = crate::project::midi_clip::MidiClip {
+            id: clip_id,
+            name: "MIDI Clip".into(),
+            position_frames,
+            length_frames,
+            notes: Vec::new(),
+            color: [0x8a, 0x2b, 0xe2],
+        };
+
+        if let Some(track) = self.project.tracks.get_mut(track_index) {
+            track.add_clip(ClipKind::Midi(midi_clip));
+        }
+
+        if let Ok(mut tracks) = self.engine.tracks.lock() {
+            if let Some(handle) = tracks.get_mut(track_index) {
+                let clip_handle = ClipHandle::new_midi(clip_id, Vec::new(), length_frames);
+                clip_handle.set_position(position_frames);
+                handle.add_clip(clip_handle);
+            }
+        }
+
+        if let Some(tui) = self.track_ui.get_mut(track_index) {
+            tui.color = [0x2a, 0x1a, 0x3a];
+        }
     }
 
     pub fn delete_track(&mut self, track_index: usize) {
@@ -176,7 +291,10 @@ impl HdawApp {
         if let Some(selected) = self.timeline_state.selected_clip_id {
             let mut found = false;
             for (_ti, track) in self.project.tracks.iter().enumerate() {
-                if track.clips.iter().any(|c| c.id == selected) {
+                if track.clips.iter().any(|c| match c {
+                    ClipKind::Audio(a) => a.id == selected,
+                    ClipKind::Midi(m) => m.id == selected,
+                }) {
                     found = true;
                     break;
                 }
@@ -199,11 +317,13 @@ impl HdawApp {
             None => return,
         };
 
-        let buffer = match pool_clip.clip.buffer.clone() {
-            Some(buf) => buf,
-            None => return,
+        let (buffer, clip_id) = match &pool_clip.clip {
+            ClipKind::Audio(a) => match a.buffer.clone() {
+                Some(buf) => (buf, a.id),
+                None => return,
+            },
+            ClipKind::Midi(_) => return,
         };
-        let clip_id = pool_clip.clip.id;
 
         let clip_handle = ClipHandle::new(
             clip_id,
@@ -217,7 +337,7 @@ impl HdawApp {
         audio_clip.position_frames = position_frames;
 
         if let Some(track) = self.project.tracks.get_mut(track_index) {
-            track.add_clip(audio_clip);
+            track.add_clip(ClipKind::Audio(audio_clip));
         }
 
         if let Ok(mut tracks) = self.engine.tracks.lock() {

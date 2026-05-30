@@ -8,6 +8,7 @@ pub fn render(app: &mut HdawApp, ctx: &Context) {
 
     let loop_enabled = app.engine.transport.loop_enabled.load(std::sync::atomic::Ordering::Acquire);
 
+    let has_instruments = app.plugin_registry.iter().any(|d| d.is_instrument);
     let action = crate::ui::toolbar::render(
         ctx,
         is_playing,
@@ -22,6 +23,7 @@ pub fn render(app: &mut HdawApp, ctx: &Context) {
         app.mixer_state.visible,
         app.selected_track.is_some(),
         app.audio_pool_state.visible,
+        has_instruments,
     );
 
     if action.play_clicked {
@@ -66,6 +68,9 @@ pub fn render(app: &mut HdawApp, ctx: &Context) {
     if action.add_track_clicked {
         app.add_blank_track();
     }
+    if action.add_instrument_clicked {
+        app.show_instrument_dialog = true;
+    }
     if action.delete_track_clicked {
         if let Some(idx) = app.selected_track {
             app.delete_track(idx);
@@ -89,7 +94,33 @@ pub fn render(app: &mut HdawApp, ctx: &Context) {
     }
 
     crate::ui::effect_editor::render(ctx, app);
+    crate::ui::piano_roll::render(ctx, app);
     crate::ui::preferences::render(ctx, app);
+
+    if app.show_instrument_dialog {
+        let instruments: Vec<_> = app.plugin_registry.iter()
+            .filter(|d| d.is_instrument)
+            .cloned().collect();
+        if !instruments.is_empty() {
+            egui::Window::new("Select Instrument")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, (0.0, 0.0))
+                .show(ctx, |ui| {
+                    for desc in &instruments {
+                        if ui.button(&desc.name).clicked() {
+                            app.add_instrument_track(desc);
+                            app.show_instrument_dialog = false;
+                        }
+                    }
+                    if ui.button("Cancel").clicked() {
+                        app.show_instrument_dialog = false;
+                    }
+                });
+        } else {
+            app.show_instrument_dialog = false;
+        }
+    }
 
     let mut pool_state = std::mem::take(&mut app.audio_pool_state);
     crate::ui::audio_pool::render(ctx, &mut pool_state, app);

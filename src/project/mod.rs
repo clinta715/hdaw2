@@ -2,6 +2,8 @@ pub mod automation;
 pub mod clip;
 pub mod clip_handle;
 pub mod marker;
+pub mod midi_clip;
+pub mod midi_note;
 pub mod pool;
 pub mod track;
 

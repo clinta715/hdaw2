@@ -27,6 +27,7 @@ pub struct TimelineState {
     pub loop_drag: Option<LoopDragState>,
     pub header_width: f32,
     pub track_height: f32,
+    pub track_context_menu: Option<usize>,
 }
 
 pub struct LoopDragState {
@@ -94,6 +95,7 @@ impl Default for TimelineState {
             loop_drag: None,
             header_width: DEFAULT_HEADER_WIDTH,
             track_height: DEFAULT_TRACK_HEIGHT,
+            track_context_menu: None,
         }
     }
 }
@@ -145,6 +147,62 @@ pub fn render(ui: &mut Ui, app: &mut HdawApp) {
     interaction::handle_track_header_interaction(&response, ui, &rect, app, header_width, track_height);
     auto_interaction::sync_automation_to_project(app);
     auto_interaction::handle_automation_interaction(&response, &rect, app, header_width, track_height);
+    handle_track_context_menu(ui, app);
+}
+
+fn handle_track_context_menu(ui: &Ui, app: &mut HdawApp) {
+    let track_idx = match app.timeline_state.track_context_menu {
+        Some(i) if i < app.track_ui.len() => i,
+        _ => return,
+    };
+
+    let name = &app.track_ui[track_idx].name;
+    let mut close = false;
+
+    egui::Window::new(format!("Track: {name}"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, (0.0, 0.0))
+        .show(ui.ctx(), |ui| {
+            if ui.button("Add Effect...").clicked() {
+                app.effect_editor_state.selected_track = Some(track_idx);
+                app.effect_editor_state.show_add_menu = true;
+                app.effect_editor_state.show_editor = true;
+                close = true;
+            }
+
+            ui.separator();
+            if ui.button("New MIDI Clip").clicked() {
+                let sr = app.engine.transport.sample_rate();
+                let pos = app.engine.transport.position_frames();
+                let len = (sr as u64).max(4); // 1 second default
+                app.add_midi_clip(track_idx, pos, len);
+                close = true;
+            }
+
+            let instruments: Vec<_> = app.plugin_registry.iter()
+                .filter(|d| d.is_instrument)
+                .cloned().collect();
+            if !instruments.is_empty() {
+                ui.separator();
+                ui.label("Add Instrument Track");
+                for desc in &instruments {
+                    if ui.button(&desc.name).clicked() {
+                        app.add_instrument_track(desc);
+                        close = true;
+                    }
+                }
+            }
+
+            ui.separator();
+            if ui.button("Cancel").clicked() {
+                close = true;
+            }
+        });
+
+    if close {
+        app.timeline_state.track_context_menu = None;
+    }
 }
 
 fn handle_zoom_and_scroll(ui: &Ui, response: &Response, rect: &Rect, app: &mut HdawApp, header_width: f32) {

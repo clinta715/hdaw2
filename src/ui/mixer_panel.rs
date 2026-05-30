@@ -40,10 +40,11 @@ fn draw_master(ui: &mut egui::Ui, state: &mut MixerPanelState) {
     ui.vertical(|ui| {
         ui.set_width(100.0);
         ui.colored_label(Color32::from_rgb(0xcc, 0xaa, 0x44), "Master");
-        let (master_rect, _) = ui.allocate_exact_size(egui::vec2(20.0, 80.0), egui::Sense::hover());
-        draw_vu_meter(ui, master_rect, state.master_volume, false);
-        ui.add_space(4.0);
-        ui.add(Slider::new(&mut state.master_volume, 0.0..=1.0).text("Vol"));
+        ui.horizontal(|ui| {
+            let (master_rect, _) = ui.allocate_exact_size(egui::vec2(20.0, 80.0), egui::Sense::hover());
+            draw_vu_meter(ui, master_rect, state.master_volume, false);
+            ui.add(egui::Slider::new(&mut state.master_volume, 0.0..=1.0).vertical().text("Vol"));
+        });
         ui.label(format!("{:.2}", state.master_volume));
     });
 }
@@ -65,17 +66,15 @@ fn draw_channel(ui: &mut egui::Ui, _index: usize, tui: &TrackUiState) {
         ui.add_space(2.0);
         ui.colored_label(color, name);
 
-        ui.add_space(2.0);
-        let (meter_rect, _) = ui.allocate_exact_size(egui::vec2(16.0, 60.0), egui::Sense::hover());
-        draw_vu_meter(ui, meter_rect, peak, muted);
+        ui.horizontal(|ui| {
+            let (meter_rect, _) = ui.allocate_exact_size(egui::vec2(16.0, 60.0), egui::Sense::hover());
+            draw_vu_meter(ui, meter_rect, peak, muted);
+            let response = ui.add(Slider::new(&mut vol, 0.0..=1.0).vertical().text(""));
+            if response.changed() {
+                tui.volume.store(vol.to_bits(), Ordering::Release);
+            }
+        });
 
-        ui.add_space(4.0);
-        let response = ui.add(Slider::new(&mut vol, 0.0..=1.0).vertical().text(""));
-        if response.changed() {
-            tui.volume.store(vol.to_bits(), Ordering::Release);
-        }
-
-        ui.add_space(2.0);
         ui.label(format!("{:.1}", vol));
     });
 }

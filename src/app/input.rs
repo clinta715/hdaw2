@@ -1,5 +1,6 @@
 use crate::app::HdawApp;
 use crate::app::prefs_io;
+use crate::project::clip::ClipKind;
 use egui_file_dialog::{DialogState, FileDialog};
 
 pub fn handle_keyboard_input(app: &mut HdawApp, ctx: &egui::Context) {
@@ -50,7 +51,10 @@ pub fn handle_keyboard_input(app: &mut HdawApp, ctx: &egui::Context) {
         if input.consume_key(egui::Modifiers::NONE, Key::End) {
             let last = app.project.tracks.iter()
                 .flat_map(|t| t.clips.iter())
-                .map(|c| c.position_frames + c.length_frames)
+                .filter_map(|c| match c {
+                    ClipKind::Audio(a) => Some(a.position_frames + a.length_frames),
+                    ClipKind::Midi(m) => Some(m.position_frames + m.length_frames),
+                })
                 .max().unwrap_or(0);
             app.seek_frame = last;
             app.seek_requested = true;

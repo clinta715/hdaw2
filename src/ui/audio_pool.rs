@@ -1,4 +1,5 @@
 use crate::app::HdawApp;
+use crate::project::clip::ClipKind;
 use egui::{Color32, Context, Id, ScrollArea};
 
 pub struct AudioPoolPanelState {
@@ -52,11 +53,14 @@ fn draw_pool_panel(ui: &mut egui::Ui, state: &mut AudioPoolPanelState, app: &mut
     }
 
     ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        let pool_clips: Vec<(uuid::Uuid, String, f64)> = app.project.audio_pool.iter().map(|p| {
-            let secs = p.clip.buffer.as_ref()
-                .map(|b| b.frames() as f64 / b.sample_rate() as f64)
-                .unwrap_or(0.0);
-            (p.id, p.name.clone(), secs)
+        let pool_clips: Vec<(uuid::Uuid, String, f64)> = app.project.audio_pool.iter().filter_map(|p| {
+            let secs = match &p.clip {
+                ClipKind::Audio(a) => a.buffer.as_ref()
+                    .map(|b| b.frames() as f64 / b.sample_rate() as f64)
+                    .unwrap_or(0.0),
+                ClipKind::Midi(_) => 0.0,
+            };
+            Some((p.id, p.name.clone(), secs))
         }).collect();
         drop(());
 

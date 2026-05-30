@@ -25,6 +25,7 @@ pub struct EffectInstance {
     pub effect_type: EffectType,
     pub bypass: AtomicBool,
     pub kind: EffectKind,
+    pub has_note_input: bool,
 }
 
 impl EffectInstance {
@@ -35,16 +36,19 @@ impl EffectInstance {
             effect_type,
             bypass: AtomicBool::new(false),
             kind: EffectKind::BuiltIn(effect),
+            has_note_input: false,
         }
     }
 
     pub fn new_clap(name: String, effect_type: EffectType, adapter: ClapEffectAdapter) -> Self {
+        let has_note_input = adapter.has_note_input();
         Self {
             id: Uuid::new_v4(),
             name,
             effect_type,
             bypass: AtomicBool::new(false),
             kind: EffectKind::Clap(Mutex::new(adapter)),
+            has_note_input,
         }
     }
 

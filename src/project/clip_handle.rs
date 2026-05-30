@@ -1,3 +1,4 @@
+use crate::project::midi_note::MidiNote;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -11,6 +12,7 @@ pub struct ClipHandle {
     pub audio_data: Arc<Vec<f32>>,
     pub channels: u16,
     pub sample_rate: u32,
+    pub midi_notes: Vec<MidiNote>,
 }
 
 impl ClipHandle {
@@ -25,10 +27,28 @@ impl ClipHandle {
             audio_data: Arc::new(audio_data),
             channels,
             sample_rate,
+            midi_notes: Vec::new(),
+        }
+    }
+
+    pub fn new_midi(clip_id: Uuid, notes: Vec<MidiNote>, length: u64) -> Self {
+        Self {
+            clip_id,
+            position_frames: AtomicU64::new(0),
+            offset_frames: AtomicU64::new(0),
+            length_frames: AtomicU64::new(length),
+            gain: Arc::new(AtomicU32::new(f32::to_bits(1.0))),
+            audio_data: Arc::new(Vec::new()),
+            channels: 0,
+            sample_rate: 44100,
+            midi_notes: notes,
         }
     }
 
     pub fn frames(&self) -> usize {
+        if !self.midi_notes.is_empty() {
+            return self.length_frames.load(Ordering::Acquire) as usize;
+        }
         self.audio_data.len() / self.channels as usize
     }
 

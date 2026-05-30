@@ -4,6 +4,7 @@ pub mod prefs_io;
 pub mod project_io;
 pub mod undo;
 
+use crate::audio::clap_scanner::PluginDescriptor;
 use crate::audio::engine::AudioEngine;
 use crate::project::Project;
 use crate::ui::audio_pool::AudioPoolPanelState;
@@ -16,6 +17,7 @@ use egui_file_dialog::FileDialog;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::Arc;
+use uuid::Uuid;
 
 pub struct TrackUiState {
     pub name: String,
@@ -53,8 +55,12 @@ pub struct HdawApp {
     pub open_requested: bool,
     pub current_path: Option<PathBuf>,
     pub error_message: Option<String>,
+    pub show_instrument_dialog: bool,
+    pub show_piano_roll: bool,
+    pub editing_midi_clip_id: Option<Uuid>,
     pub undo_state: undo::UndoStack,
     pub preferences: PreferencesState,
+    pub plugin_registry: Vec<PluginDescriptor>,
 }
 
 impl HdawApp {
@@ -87,8 +93,12 @@ impl HdawApp {
             open_requested: false,
             current_path: None,
             error_message: None,
+            show_instrument_dialog: false,
+            show_piano_roll: false,
+            editing_midi_clip_id: None,
             undo_state: undo::UndoStack::new(),
             preferences: prefs_io::load_preferences().unwrap_or_default(),
+            plugin_registry: Vec::new(),
         };
         app.project.bpm = app.preferences.default_bpm;
         app.project.time_signature_num = app.preferences.default_time_sig_num;
@@ -99,6 +109,7 @@ impl HdawApp {
         app.timeline_state.track_height = app.preferences.track_height;
         app.mixer_state.visible = app.preferences.show_mixer_on_start;
         app.audio_pool_state.visible = app.preferences.show_pool_on_start;
+        app.scan_plugins();
         app.add_blank_track();
         app
     }
@@ -132,17 +143,19 @@ impl HdawApp {
     }
 
     pub fn undo(&mut self) {
+        let sr = self.engine.transport.sample_rate();
         if let Ok(mut tracks) = self.engine.tracks.lock() {
             if let Some(cmd) = self.undo_state.undo() {
-                undo::apply_undo(&mut self.project, &mut tracks, cmd);
+                undo::apply_undo(&mut self.project, &mut tracks, cmd, sr);
             }
         }
     }
 
     pub fn redo(&mut self) {
+        let sr = self.engine.transport.sample_rate();
         if let Ok(mut tracks) = self.engine.tracks.lock() {
             if let Some(cmd) = self.undo_state.redo() {
-                undo::apply_redo(&mut self.project, &mut tracks, cmd);
+                undo::apply_redo(&mut self.project, &mut tracks, cmd, sr);
             }
         }
     }
@@ -159,6 +172,10 @@ impl HdawApp {
         );
         self.timeline_state.header_width = prefs.header_width;
         self.timeline_state.track_height = prefs.track_height;
+    }
+
+    pub fn scan_plugins(&mut self) {
+        self.plugin_registry = crate::audio::clap_scanner::scan_plugins();
     }
 }
 

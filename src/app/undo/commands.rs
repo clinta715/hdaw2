@@ -1,9 +1,12 @@
+use crate::audio::clap_effect::ClapEffectAdapter;
 use crate::audio::effects::create_effect;
-use crate::audio::effects::dsp_effect::EffectInstance;
+use crate::audio::effects::dsp_effect::{EffectInstance, EffectType};
 use crate::project::automation::AutomationPoint;
+use crate::project::clip::ClipKind;
 use crate::project::clip_handle::ClipHandle;
 use crate::project::track::TrackHandle;
 use crate::project::Project;
+use std::path::Path;
 use std::sync::atomic::Ordering;
 
 use super::UndoCommand;
@@ -58,23 +61,54 @@ fn remove_point(tracks: &mut [TrackHandle], project: &mut Project, track_index: 
     }
 }
 
-fn recreate_effect(serialized: &crate::project::track::SerializedEffect) -> EffectInstance {
-    let effect = create_effect(serialized.effect_type.clone());
-    for (i, val) in serialized.param_values.iter().enumerate() {
-        if let Some(info) = effect.parameter_info().get(i) {
-            effect.set_parameter(info.id, *val);
+fn recreate_effect(serialized: &crate::project::track::SerializedEffect, sample_rate: u32) -> EffectInstance {
+    match &serialized.effect_type {
+        EffectType::Clap { plugin_id, path } => {
+            match ClapEffectAdapter::new_instance(plugin_id, Path::new(path), sample_rate) {
+                Ok(adapter) => {
+                    let inst = EffectInstance::new_clap(
+                        serialized.name.clone(),
+                        serialized.effect_type.clone(),
+                        adapter,
+                    );
+                    inst.set_bypass(serialized.bypass);
+                    inst
+                }
+                Err(e) => {
+                    tracing::error!("Failed to recreate CLAP effect {}: {}", plugin_id, e);
+                    let effect = create_effect(EffectType::Gain);
+                    let inst = EffectInstance::new_builtin(
+                        serialized.name.clone(),
+                        serialized.effect_type.clone(),
+                        effect,
+                    );
+                    inst.set_bypass(serialized.bypass);
+                    inst
+                }
+            }
+        }
+        _ => {
+            let effect = create_effect(serialized.effect_type.clone());
+            for (i, val) in serialized.param_values.iter().enumerate() {
+                if let Some(info) = effect.parameter_info().get(i) {
+                    effect.set_parameter(info.id, *val);
+                }
+            }
+            let inst = EffectInstance::new_builtin(serialized.name.clone(), serialized.effect_type.clone(), effect);
+            inst.set_bypass(serialized.bypass);
+            inst
         }
     }
-    let inst = EffectInstance::new_builtin(serialized.name.clone(), serialized.effect_type.clone(), effect);
-    inst.set_bypass(serialized.bypass);
-    inst
 }
 
-pub fn apply_undo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoCommand) {
+pub fn apply_undo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoCommand, sample_rate: u32) {
     match *cmd {
         UndoCommand::MoveClip { track_index, clip_id, old_position, .. } => {
             if let Some(track) = project.tracks.get_mut(track_index) {
-                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                if let Some(ClipKind::Audio(clip)) = track.clips.iter_mut().find(|c| match c {
+                    ClipKind::Audio(a) => a.id == clip_id,
+                    ClipKind::Midi(_) => false,
+                }) {
                     clip.position_frames = old_position;
                 }
             }
@@ -86,7 +120,10 @@ pub fn apply_undo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoC
         }
         UndoCommand::TrimClip { track_index, clip_id, old_offset, old_length, .. } => {
             if let Some(track) = project.tracks.get_mut(track_index) {
-                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                if let Some(ClipKind::Audio(clip)) = track.clips.iter_mut().find(|c| match c {
+                    ClipKind::Audio(a) => a.id == clip_id,
+                    ClipKind::Midi(_) => false,
+                }) {
                     clip.offset_frames = old_offset;
                     clip.length_frames = old_length;
                 }
@@ -100,16 +137,24 @@ pub fn apply_undo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoC
         }
         UndoCommand::DeleteClip { track_index, clip_index: _, ref clip } => {
             if let Some(track) = project.tracks.get_mut(track_index) {
-                let pos = track.clips.iter().position(|c| c.id == clip.id)
-                    .unwrap_or(track.clips.len());
-                if let Some(buf) = clip.buffer.as_ref() {
-                    let ch = ClipHandle::new(clip.id, (**buf.samples()).clone(), buf.channels(), buf.sample_rate());
-                    ch.set_position(clip.position_frames);
-                    ch.set_offset(clip.offset_frames);
-                    ch.set_length(clip.length_frames);
-                    if let Some(handle) = tracks.get_mut(track_index) {
-                        let eng_pos = handle.find_clip_by_id(clip.id).unwrap_or(handle.clips.len());
-                        handle.clips.insert(eng_pos, ch);
+                let clip_id = match clip {
+                    ClipKind::Audio(a) => a.id,
+                    ClipKind::Midi(m) => m.id,
+                };
+                let pos = track.clips.iter().position(|c| match c {
+                    ClipKind::Audio(a) => a.id == clip_id,
+                    ClipKind::Midi(m) => m.id == clip_id,
+                }).unwrap_or(track.clips.len());
+                if let ClipKind::Audio(audio_clip) = clip {
+                    if let Some(buf) = audio_clip.buffer.as_ref() {
+                        let ch = ClipHandle::new(audio_clip.id, (**buf.samples()).clone(), buf.channels(), buf.sample_rate());
+                        ch.set_position(audio_clip.position_frames);
+                        ch.set_offset(audio_clip.offset_frames);
+                        ch.set_length(audio_clip.length_frames);
+                        if let Some(handle) = tracks.get_mut(track_index) {
+                            let eng_pos = handle.find_clip_by_id(audio_clip.id).unwrap_or(handle.clips.len());
+                            handle.clips.insert(eng_pos, ch);
+                        }
                     }
                 }
                 track.clips.insert(pos, clip.clone());
@@ -126,7 +171,7 @@ pub fn apply_undo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoC
         UndoCommand::RemoveEffect { track_index, effect_index, ref serialized } => {
             if let Some(handle) = tracks.get_mut(track_index) {
                 let idx = effect_index.min(handle.fx_chain.len());
-                handle.fx_chain.insert(idx, recreate_effect(serialized));
+                handle.fx_chain.insert(idx, recreate_effect(serialized, sample_rate));
             }
             if let Some(track) = project.tracks.get_mut(track_index) {
                 let idx = effect_index.min(track.fx_chain.len());
@@ -156,11 +201,14 @@ pub fn apply_undo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoC
     }
 }
 
-pub fn apply_redo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoCommand) {
+pub fn apply_redo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoCommand, sample_rate: u32) {
     match *cmd {
         UndoCommand::MoveClip { track_index, clip_id, new_position, .. } => {
             if let Some(track) = project.tracks.get_mut(track_index) {
-                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                if let Some(ClipKind::Audio(clip)) = track.clips.iter_mut().find(|c| match c {
+                    ClipKind::Audio(a) => a.id == clip_id,
+                    ClipKind::Midi(_) => false,
+                }) {
                     clip.position_frames = new_position;
                 }
             }
@@ -172,7 +220,10 @@ pub fn apply_redo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoC
         }
         UndoCommand::TrimClip { track_index, clip_id, new_offset, new_length, .. } => {
             if let Some(track) = project.tracks.get_mut(track_index) {
-                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                if let Some(ClipKind::Audio(clip)) = track.clips.iter_mut().find(|c| match c {
+                    ClipKind::Audio(a) => a.id == clip_id,
+                    ClipKind::Midi(_) => false,
+                }) {
                     clip.offset_frames = new_offset;
                     clip.length_frames = new_length;
                 }
@@ -185,18 +236,25 @@ pub fn apply_redo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoC
             }
         }
         UndoCommand::DeleteClip { track_index, clip_index: _, ref clip } => {
+            let clip_id = match clip {
+                ClipKind::Audio(a) => a.id,
+                ClipKind::Midi(m) => m.id,
+            };
             if let Some(track) = project.tracks.get_mut(track_index) {
-                if let Some(pos) = track.clips.iter().position(|c| c.id == clip.id) { track.clips.remove(pos); }
+                if let Some(pos) = track.clips.iter().position(|c| match c {
+                    ClipKind::Audio(a) => a.id == clip_id,
+                    ClipKind::Midi(m) => m.id == clip_id,
+                }) { track.clips.remove(pos); }
             }
             if let Some(handle) = tracks.get_mut(track_index) {
-                if let Some(pos) = handle.find_clip_by_id(clip.id) { handle.clips.remove(pos); }
+                if let Some(pos) = handle.find_clip_by_id(clip_id) { handle.clips.remove(pos); }
             }
         }
         UndoCommand::AddEffect { .. } => {}
         UndoCommand::RemoveEffect { track_index, effect_index, ref serialized } => {
             if let Some(handle) = tracks.get_mut(track_index) {
                 let idx = effect_index.min(handle.fx_chain.len());
-                handle.fx_chain.insert(idx, recreate_effect(serialized));
+                handle.fx_chain.insert(idx, recreate_effect(serialized, sample_rate));
             }
             if let Some(track) = project.tracks.get_mut(track_index) {
                 let idx = effect_index.min(track.fx_chain.len());

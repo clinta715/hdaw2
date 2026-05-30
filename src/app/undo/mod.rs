@@ -1,7 +1,7 @@
 mod commands;
 
 use crate::project::automation::AutomationPoint;
-use crate::project::clip::AudioClip;
+use crate::project::clip::ClipKind;
 use crate::project::track::SerializedEffect;
 
 pub use commands::{apply_undo, apply_redo};
@@ -26,7 +26,7 @@ pub enum UndoCommand {
     DeleteClip {
         track_index: usize,
         clip_index: usize,
-        clip: AudioClip,
+        clip: ClipKind,
     },
     AddEffect {
         track_index: usize,

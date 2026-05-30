@@ -1,4 +1,5 @@
 use crate::audio::buffer::AudioBuffer;
+use crate::project::midi_clip::MidiClip;
 use crate::utils::waveform::WaveformPeaks;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -78,4 +79,10 @@ impl AudioClip {
         self.buffer = Some(buffer);
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ClipKind {
+    Audio(AudioClip),
+    Midi(MidiClip),
 }

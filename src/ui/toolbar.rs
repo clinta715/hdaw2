@@ -24,6 +24,7 @@ pub struct ToolbarAction {
     pub loop_clicked: bool,
     pub add_track_clicked: bool,
     pub delete_track_clicked: bool,
+    pub add_instrument_clicked: bool,
     pub mixer_clicked: bool,
     pub pool_clicked: bool,
     pub preferences_clicked: bool,
@@ -43,6 +44,7 @@ pub fn render(
     mixer_visible: bool,
     has_selected_track: bool,
     pool_visible: bool,
+    has_instruments: bool,
 ) -> ToolbarAction {
     let mut action = ToolbarAction {
         play_clicked: false,
@@ -60,6 +62,7 @@ pub fn render(
         loop_clicked: false,
         add_track_clicked: false,
         delete_track_clicked: false,
+        add_instrument_clicked: false,
         mixer_clicked: false,
         pool_clicked: false,
         preferences_clicked: false,
@@ -162,9 +165,18 @@ pub fn render(
 
             ui.separator();
 
-            if ui.add(egui::Button::new("+").small()).clicked() {
-                action.add_track_clicked = true;
-            }
+            ui.menu_button("+", |ui| {
+                if ui.button("Track").clicked() {
+                    action.add_track_clicked = true;
+                    ui.close_menu();
+                }
+                if has_instruments {
+                    if ui.button("Instrument...").clicked() {
+                        action.add_instrument_clicked = true;
+                        ui.close_menu();
+                    }
+                }
+            });
             if ui.add_enabled(has_selected_track, egui::Button::new("-").small()).clicked() {
                 action.delete_track_clicked = true;
             }
