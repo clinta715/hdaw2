@@ -1,7 +1,7 @@
 mod commands;
 
 use crate::app::TrackUiState;
-use crate::project::automation::AutomationPoint;
+use crate::project::automation::{AutomationLane, AutomationPoint};
 use crate::project::clip::ClipKind;
 use crate::project::midi_note::MidiNote;
 use crate::project::track::{SerializedEffect, Track};
@@ -39,6 +39,7 @@ pub enum UndoCommand {
         track_index: usize,
         effect_index: usize,
         serialized: SerializedEffect,
+        removed_lanes: Vec<AutomationLane>,
     },
     ToggleMute {
         track_index: usize,
@@ -77,9 +78,27 @@ pub enum UndoCommand {
         note: MidiNote,
         note_index: usize,
     },
+    FadeClip {
+        track_index: usize,
+        clip_id: uuid::Uuid,
+        old_fade_in: u64,
+        old_fade_out: u64,
+        new_fade_in: u64,
+        new_fade_out: u64,
+    },
     AddMidiClip {
         track_index: usize,
         clip: ClipKind,
+    },
+    ImportAudio {
+        tracks: Vec<ImportTrackSnapshot>,
+    },
+    ImportMidi {
+        tracks: Vec<ImportTrackSnapshot>,
+    },
+    RecordAudio {
+        track_indices: Vec<usize>,
+        clip_ids: Vec<uuid::Uuid>,
     },
     AddTrack {
         track_index: usize,
@@ -91,6 +110,18 @@ pub enum UndoCommand {
         track: Track,
         track_ui: TrackUiState,
     },
+}
+
+#[derive(Clone)]
+pub struct ImportTrackSnapshot {
+    pub track: Track,
+    pub track_ui: TrackUiState,
+}
+
+impl ImportTrackSnapshot {
+    pub fn new(track: Track, track_ui: TrackUiState) -> Self {
+        Self { track, track_ui }
+    }
 }
 
 pub struct UndoStack {

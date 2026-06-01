@@ -2,19 +2,19 @@ use crate::app::HdawApp;
 use crate::project::clip::{AudioClip, ClipKind};
 use crate::project::midi_clip::MidiClip;
 
-use crate::ui::timeline::{DragMode, DragState, TimelineState, CLIP_CORNER_RADIUS, RULER_HEIGHT};
+use crate::ui::timeline::{DragMode, DragState, CLIP_CORNER_RADIUS, RULER_HEIGHT};
 use egui::{pos2, vec2, Color32, Pos2, Rect, Response, Stroke};
 
 pub fn draw(
     painter: &egui::Painter,
     lane_rect: &Rect,
     clip: &ClipKind,
-    state: &TimelineState,
+    app: &mut HdawApp,
     sample_rate: u32,
 ) {
     match clip {
-        ClipKind::Audio(audio_clip) => draw_audio(painter, lane_rect, audio_clip, state, sample_rate),
-        ClipKind::Midi(midi_clip) => draw_midi(painter, lane_rect, midi_clip, state, sample_rate),
+        ClipKind::Audio(audio_clip) => draw_audio(painter, lane_rect, audio_clip, app, sample_rate),
+        ClipKind::Midi(midi_clip) => draw_midi(painter, lane_rect, midi_clip, app, sample_rate),
     }
 }
 
@@ -22,12 +22,12 @@ fn draw_audio(
     painter: &egui::Painter,
     lane_rect: &Rect,
     clip: &AudioClip,
-    state: &TimelineState,
+    app: &mut HdawApp,
     sample_rate: u32,
 ) {
     let sr = sample_rate as f64;
-    let pps = state.pixels_per_second;
-    let scroll_x = state.scroll_x;
+    let pps = app.timeline_state.pixels_per_second;
+    let scroll_x = app.timeline_state.scroll_x;
 
     let clip_left = (clip.position_frames as f64 / sr) * pps - scroll_x;
     let clip_width = ((clip.length_frames - clip.offset_frames) as f64 / sr) * pps;
@@ -42,7 +42,7 @@ fn draw_audio(
     let available_w = (clip_width as f32).min(lane_rect.right() - left_pixel).max(1.0);
     let clip_rect = Rect::from_min_size(pos2(left_pixel, top), vec2(available_w, height));
 
-    let is_selected = state.selected_clip_id == Some(clip.id);
+    let is_selected = app.timeline_state.selected_clip_id == Some(clip.id);
     let bg = Color32::from_rgb(0x2a, 0x3a, 0x2a);
     let border = if is_selected {
         Color32::from_rgb(0x64, 0xb5, 0xf6)
@@ -52,30 +52,113 @@ fn draw_audio(
     painter.rect_filled(clip_rect, CLIP_CORNER_RADIUS, bg);
     painter.rect_stroke(clip_rect, CLIP_CORNER_RADIUS, Stroke::new(1.0, border));
 
+    // Waveform Texture Caching
     if available_w > 4.0 {
         if let Some(ref waveform) = clip.waveform_peaks {
-            let peaks = waveform.peaks.as_ref();
-            if !peaks.is_empty() {
-                let step = available_w / peaks.len() as f32;
-                let mid_y = clip_rect.center().y;
-                let amp = (clip_rect.height() / 2.0 - 2.0).max(1.0);
-                let wave_color = Color32::from_rgba_premultiplied(0x8b, 0xc3, 0x4a, 180);
-                for (pi, p) in peaks.iter().enumerate() {
-                    let px = left_pixel + pi as f32 * step;
-                    if px < lane_rect.left() || px > lane_rect.right() {
-                        continue;
+            let wav_width = waveform.peaks.len().min(4096).max(1);
+            let wav_height = (app.timeline_state.track_height as usize).max(1);
+            let clip_id = clip.id;
+
+            let texture = app.waveform_cache.entry(clip_id).or_insert_with(|| {
+                let peaks = waveform.peaks.as_ref();
+                let width = wav_width;
+                let height = wav_height;
+                let mut pixels = vec![egui::Color32::TRANSPARENT; width * height];
+                
+                let peaks_per_pixel = peaks.len() as f32 / width as f32;
+                let mid_y = height as f32 / 2.0;
+                let amp = (height as f32 / 2.0 - 2.0).max(1.0);
+                let wave_color = Color32::from_rgb(0x8b, 0xc3, 0x4a);
+
+                for i in 0..width {
+                    let start = (i as f32 * peaks_per_pixel) as usize;
+                    let end = ((i + 1) as f32 * peaks_per_pixel) as usize;
+                    let end = end.min(peaks.len());
+                    
+                    let mut min = 0.0f32;
+                    let mut max = 0.0f32;
+                    for p_idx in start..end {
+                        let p = &peaks[p_idx];
+                        min = min.min(p.min);
+                        max = max.max(p.max);
                     }
-                    let y1 = mid_y - p.max.abs() * amp;
-                    let y2 = mid_y + p.min.abs() * amp;
-                    if (y2 - y1) > 0.5 || p.max.abs() > 0.001 {
-                        painter.line_segment(
-                            [pos2(px, y1), pos2(px, y2)],
-                            Stroke::new(1.0, wave_color),
-                        );
+                    
+                    let y1 = (mid_y - max.abs() * amp).clamp(0.0, height as f32 - 1.0) as usize;
+                    let y2 = (mid_y + min.abs() * amp).clamp(0.0, height as f32 - 1.0) as usize;
+                    
+                    for y in y1..=y2 {
+                        pixels[y * width + i] = wave_color;
                     }
                 }
-            }
+
+                painter.ctx().load_texture(
+                    format!("waveform_{}", clip_id),
+                    egui::ColorImage {
+                        size: [width, height],
+                        pixels,
+                    },
+                    egui::TextureOptions::LINEAR,
+                )
+            });
+
+            painter.image(
+                texture.id(),
+                clip_rect,
+                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
         }
+    }
+
+    // Draw fade handles
+    let fade_handle_size = 10.0;
+    let fade_color = Color32::from_rgba_premultiplied(0x64, 0xb5, 0xf6, 180);
+    let fade_stroke = Stroke::new(1.0, Color32::from_rgb(0x64, 0xb5, 0xf6));
+
+    // Fade-in handle (top-left triangle)
+    if clip.fade_in_frames > 0 || clip_rect.width() > 30.0 {
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                pos2(clip_rect.left(), clip_rect.top()),
+                pos2(clip_rect.left() + fade_handle_size, clip_rect.top()),
+                pos2(clip_rect.left(), clip_rect.top() + fade_handle_size),
+            ],
+            fade_color,
+            fade_stroke,
+        ));
+    }
+
+    // Fade-out handle (top-right triangle)
+    if clip.fade_out_frames > 0 || clip_rect.width() > 30.0 {
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                pos2(clip_rect.right(), clip_rect.top()),
+                pos2(clip_rect.right() - fade_handle_size, clip_rect.top()),
+                pos2(clip_rect.right(), clip_rect.top() + fade_handle_size),
+            ],
+            fade_color,
+            fade_stroke,
+        ));
+    }
+
+    // Draw fade region overlay (dimmed zone where fade occurs)
+    if clip.fade_in_frames > 0 {
+        let fade_fraction = (clip.fade_in_frames as f64 / clip.length_frames as f64).min(1.0) as f32;
+        let fade_width = (clip_rect.width() * fade_fraction).min(clip_rect.width() / 2.0);
+        let fade_rect = Rect::from_min_size(
+            clip_rect.left_top(),
+            vec2(fade_width, clip_rect.height()),
+        );
+        painter.rect_filled(fade_rect, CLIP_CORNER_RADIUS, Color32::from_black_alpha(40));
+    }
+    if clip.fade_out_frames > 0 {
+        let fade_fraction = (clip.fade_out_frames as f64 / clip.length_frames as f64).min(1.0) as f32;
+        let fade_width = (clip_rect.width() * fade_fraction).min(clip_rect.width() / 2.0);
+        let fade_rect = Rect::from_min_size(
+            pos2(clip_rect.right() - fade_width, clip_rect.top()),
+            vec2(fade_width, clip_rect.height()),
+        );
+        painter.rect_filled(fade_rect, CLIP_CORNER_RADIUS, Color32::from_black_alpha(40));
     }
 
     if available_w > 40.0 {
@@ -84,9 +167,30 @@ fn draw_audio(
             pos2(clip_rect.left() + 4.0, clip_rect.top() + 2.0),
             egui::Align2::LEFT_TOP,
             &clip.name,
-            small_font,
+            small_font.clone(),
             Color32::from_gray(200),
         );
+        // Show fade lengths as label on the fade region
+        if clip.fade_in_frames > 0 {
+            let fade_secs = clip.fade_in_frames as f64 / sample_rate as f64;
+            painter.text(
+                pos2(clip_rect.left() + 4.0, clip_rect.bottom() - 2.0),
+                egui::Align2::LEFT_BOTTOM,
+                format!("fade-in {:.1}s", fade_secs),
+                small_font.clone(),
+                Color32::from_gray(140),
+            );
+        }
+        if clip.fade_out_frames > 0 {
+            let fade_secs = clip.fade_out_frames as f64 / sample_rate as f64;
+            painter.text(
+                pos2(clip_rect.right() - 4.0, clip_rect.bottom() - 2.0),
+                egui::Align2::RIGHT_BOTTOM,
+                format!("fade-out {:.1}s", fade_secs),
+                small_font,
+                Color32::from_gray(140),
+            );
+        }
     }
 }
 
@@ -94,12 +198,12 @@ fn draw_midi(
     painter: &egui::Painter,
     lane_rect: &Rect,
     clip: &MidiClip,
-    state: &TimelineState,
+    app: &mut HdawApp,
     sample_rate: u32,
 ) {
     let sr = sample_rate as f64;
-    let pps = state.pixels_per_second;
-    let scroll_x = state.scroll_x;
+    let pps = app.timeline_state.pixels_per_second;
+    let scroll_x = app.timeline_state.scroll_x;
 
     let clip_left = (clip.position_frames as f64 / sr) * pps - scroll_x;
     let clip_width = (clip.length_frames as f64 / sr) * pps;
@@ -114,7 +218,7 @@ fn draw_midi(
     let available_w = (clip_width as f32).min(lane_rect.right() - left_pixel).max(1.0);
     let clip_rect = Rect::from_min_size(pos2(left_pixel, top), vec2(available_w, height));
 
-    let is_selected = state.selected_clip_id == Some(clip.id);
+    let is_selected = app.timeline_state.selected_clip_id == Some(clip.id);
     let c = clip.color;
     let bg = Color32::from_rgb(c[0], c[1], c[2]);
     let border = if is_selected {
@@ -128,6 +232,60 @@ fn draw_midi(
     };
     painter.rect_filled(clip_rect, CLIP_CORNER_RADIUS, bg);
     painter.rect_stroke(clip_rect, CLIP_CORNER_RADIUS, Stroke::new(1.0, border));
+
+    // MIDI Thumbnail Caching — piano-roll style note bars
+    if clip.thumb_dirty {
+        app.midi_thumb_cache.remove(&clip.id);
+        // Reset dirty flag on project model
+        for track in &mut app.project.tracks {
+            if let Some(ClipKind::Midi(m)) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Midi(mc) if mc.id == clip.id)) {
+                m.thumb_dirty = false;
+                break;
+            }
+        }
+    }
+
+    if available_w > 4.0 && !clip.notes.is_empty() {
+        let thumb_w = (clip.length_frames as usize).clamp(1, 4096);
+        let thumb_h = (app.timeline_state.track_height as usize).max(1);
+        let note_color = Color32::from_rgb(c[0], c[1], c[2]);
+        let clip_id = clip.id;
+        let clip_len = clip.length_frames;
+        let notes = &clip.notes;
+
+        let texture = app.midi_thumb_cache.entry(clip_id).or_insert_with(|| {
+            let w = thumb_w;
+            let h = thumb_h;
+            let mut pixels = vec![egui::Color32::TRANSPARENT; w * h];
+            let frames_per_col = clip_len as f64 / w as f64;
+
+            for note in notes {
+                let col_start = (note.start_frame as f64 / frames_per_col) as usize;
+                let col_end = (((note.start_frame + note.duration) as f64 / frames_per_col) as usize).min(w);
+                let y = ((1.0 - note.pitch as f32 / 127.0) * (h as f32 - 1.0)).round() as usize;
+                let y = y.min(h - 1);
+                for col in col_start..col_end {
+                    pixels[y * w + col] = note_color;
+                }
+            }
+
+            painter.ctx().load_texture(
+                format!("midi_{}", clip_id),
+                egui::ColorImage {
+                    size: [w, h],
+                    pixels,
+                },
+                egui::TextureOptions::LINEAR,
+            )
+        });
+
+        painter.image(
+            texture.id(),
+            clip_rect,
+            egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+    }
 
     if available_w > 40.0 {
         let small_font = egui::FontId::proportional(10.0);
@@ -146,6 +304,13 @@ fn draw_midi(
             small_font,
             Color32::from_gray(200),
         );
+    }
+}
+
+fn read_fade_frames(clip_kind: &ClipKind) -> (u64, u64) {
+    match clip_kind {
+        ClipKind::Audio(a) => (a.fade_in_frames, a.fade_out_frames),
+        ClipKind::Midi(_) => (0, 0),
     }
 }
 
@@ -168,6 +333,7 @@ pub fn handle_interaction(
             continue;
         }
 
+        let mut hit_clip = false;
         for clip_kind in &track.clips {
             let (clip_id, position_frames, length_frames) = match clip_kind {
                 ClipKind::Audio(a) => (a.id, a.position_frames, a.length_frames),
@@ -185,40 +351,114 @@ pub fn handle_interaction(
             let right_pixel = left_pixel + clip_width;
             let edge = 6.0f64;
 
-            if response.dragged() && app.timeline_state.drag_state.is_some() {
-                if let Some(ref drag) = app.timeline_state.drag_state {
-                    if drag.clip_id == clip_id {
-                        let delta_x = pos.x as f64 - drag.drag_start_x;
-                        let delta_frames = (delta_x / pps * sr_f) as i64;
-                        match drag.mode {
-                            DragMode::Move => {
-                                let new_pos = (drag.original_position_frames as i64 + delta_frames)
-                                    .max(0) as u64;
-                                app.update_clip_position(track_idx, clip_id, new_pos);
+            if pos.x as f64 >= left_pixel && pos.x as f64 <= right_pixel {
+                hit_clip = true;
+
+                if response.dragged() && app.timeline_state.drag_state.is_some() {
+                    if let Some(ref drag) = app.timeline_state.drag_state {
+                        if drag.clip_id == clip_id {
+                            let delta_x = pos.x as f64 - drag.drag_start_x;
+                            let delta_frames = (delta_x / pps * sr_f) as i64;
+                            match drag.mode {
+                                DragMode::Move => {
+                                    let new_pos = (drag.original_position_frames as i64 + delta_frames)
+                                        .max(0) as u64;
+                                    app.update_clip_position(track_idx, clip_id, new_pos);
+                                }
+                                DragMode::TrimLeft => {
+                                    let new_off = (drag.original_offset_frames as i64 + delta_frames)
+                                        .max(0) as u64;
+                                    let new_len = drag.original_length_frames.saturating_sub(
+                                        (delta_frames.max(0) as u64).min(drag.original_length_frames),
+                                    );
+                                    app.update_clip_trim(track_idx, clip_id, None, Some(new_off), Some(new_len));
+                                }
+                                DragMode::TrimRight => {
+                                    let new_len = (drag.original_length_frames as i64 + delta_frames)
+                                        .max(1) as u64;
+                                    app.update_clip_trim(track_idx, clip_id, None, None, Some(new_len));
+                                }
+                                DragMode::FadeIn => {
+                                    let new_fade = (drag.original_fade_in as i64 + delta_frames).max(0) as u64;
+                                    app.update_clip_fade(track_idx, clip_id, Some(new_fade), None);
+                                }
+                                DragMode::FadeOut => {
+                                    let new_fade = (drag.original_fade_out as i64 - delta_frames).max(0) as u64;
+                                    app.update_clip_fade(track_idx, clip_id, None, Some(new_fade));
+                                }
                             }
-                            DragMode::TrimLeft => {
-                                let new_off = (drag.original_offset_frames as i64 + delta_frames)
-                                    .max(0) as u64;
-                                let new_len = drag.original_length_frames.saturating_sub(
-                                    (delta_frames.max(0) as u64).min(drag.original_length_frames),
-                                );
-                                app.update_clip_trim(track_idx, clip_id, None, Some(new_off), Some(new_len));
-                            }
-                            DragMode::TrimRight => {
-                                let new_len = (drag.original_length_frames as i64 + delta_frames)
-                                    .max(1) as u64;
-                                app.update_clip_trim(track_idx, clip_id, None, None, Some(new_len));
-                            }
+                            return;
                         }
-                        return;
                     }
                 }
-                continue;
-            }
 
-            if response.dragged() && app.timeline_state.drag_state.is_none() {
-                let local_x = pos.x as f64;
-                if (local_x - left_pixel).abs() < edge {
+                if response.dragged() && app.timeline_state.drag_state.is_none() {
+                    let local_x = pos.x as f64;
+                    let local_y = pos.y as f64;
+                    let track_top = rect.top() + RULER_HEIGHT + track_idx as f32 * track_height
+                        + app.timeline_state.scroll_y as f32;
+                    let rel_y = local_y - track_top as f64;
+                    let fade_hit_area = 14.0f64;
+                    let (f_in, f_out) = read_fade_frames(clip_kind);
+
+                    // Fade handle hit: top corners of clip
+                    if rel_y < fade_hit_area && (local_x - left_pixel).abs() < edge + 4.0 {
+                        app.timeline_state.drag_state = Some(DragState {
+                            clip_id,
+                            track_index: track_idx,
+                            drag_start_x: pos.x as f64,
+                            original_position_frames: 0,
+                            original_offset_frames: 0,
+                            original_length_frames: 0,
+                            original_fade_in: f_in,
+                            original_fade_out: f_out,
+                            mode: DragMode::FadeIn,
+                        });
+                        return;
+                    }
+                    if rel_y < fade_hit_area && (local_x - right_pixel).abs() < edge + 4.0 {
+                        app.timeline_state.drag_state = Some(DragState {
+                            clip_id,
+                            track_index: track_idx,
+                            drag_start_x: pos.x as f64,
+                            original_position_frames: 0,
+                            original_offset_frames: 0,
+                            original_length_frames: 0,
+                            original_fade_in: f_in,
+                            original_fade_out: f_out,
+                            mode: DragMode::FadeOut,
+                        });
+                        return;
+                    }
+
+                    if (local_x - left_pixel).abs() < edge {
+                        app.timeline_state.drag_state = Some(DragState {
+                            clip_id,
+                            track_index: track_idx,
+                            drag_start_x: pos.x as f64,
+                            original_position_frames: position_frames,
+                            original_offset_frames: 0,
+                            original_length_frames: length_frames,
+                            original_fade_in: 0,
+                            original_fade_out: 0,
+                            mode: DragMode::TrimLeft,
+                        });
+                        return;
+                    }
+                    if (local_x - right_pixel).abs() < edge {
+                        app.timeline_state.drag_state = Some(DragState {
+                            clip_id,
+                            track_index: track_idx,
+                            drag_start_x: pos.x as f64,
+                            original_position_frames: position_frames,
+                            original_offset_frames: 0,
+                            original_length_frames: length_frames,
+                            original_fade_in: 0,
+                            original_fade_out: 0,
+                            mode: DragMode::TrimRight,
+                        });
+                        return;
+                    }
                     app.timeline_state.drag_state = Some(DragState {
                         clip_id,
                         track_index: track_idx,
@@ -226,49 +466,40 @@ pub fn handle_interaction(
                         original_position_frames: position_frames,
                         original_offset_frames: 0,
                         original_length_frames: length_frames,
-                        mode: DragMode::TrimLeft,
-                    });
-                    return;
-                }
-                if (local_x - right_pixel).abs() < edge {
-                    app.timeline_state.drag_state = Some(DragState {
-                        clip_id,
-                        track_index: track_idx,
-                        drag_start_x: pos.x as f64,
-                        original_position_frames: position_frames,
-                        original_offset_frames: 0,
-                        original_length_frames: length_frames,
-                        mode: DragMode::TrimRight,
-                    });
-                    return;
-                }
-                if local_x >= left_pixel && local_x <= right_pixel {
-                    app.timeline_state.drag_state = Some(DragState {
-                        clip_id,
-                        track_index: track_idx,
-                        drag_start_x: pos.x as f64,
-                        original_position_frames: position_frames,
-                        original_offset_frames: 0,
-                        original_length_frames: length_frames,
+                        original_fade_in: 0,
+                        original_fade_out: 0,
                         mode: DragMode::Move,
                     });
                     app.timeline_state.selected_clip_id = Some(clip_id);
                     return;
                 }
-            }
 
-            if response.clicked() && pos.x as f64 >= left_pixel && pos.x as f64 <= right_pixel {
-                app.timeline_state.selected_clip_id = Some(clip_id);
-                return;
-            }
-
-            if response.double_clicked() && pos.x as f64 >= left_pixel && pos.x as f64 <= right_pixel {
-                if matches!(clip_kind, ClipKind::Midi(_)) {
-                    app.show_piano_roll = true;
-                    app.editing_midi_clip_id = Some(clip_id);
+                if response.double_clicked() {
+                    if matches!(clip_kind, ClipKind::Midi(_)) {
+                        app.show_piano_roll = true;
+                        app.editing_midi_clip_id = Some(clip_id);
+                    }
+                    return;
                 }
-                return;
+
+                if response.clicked() {
+                    app.timeline_state.selected_clip_id = Some(clip_id);
+                    return;
+                }
             }
+        }
+
+        if !hit_clip && response.double_clicked() {
+            let timeline_x = (pos.x - rect.left() - header_width) as f64 + scroll;
+            let time = timeline_x / pps;
+            if time >= 0.0 {
+                let sr = app.engine.transport.sample_rate();
+                let bpm = app.project.bpm;
+                let start_frame = app.timeline_state.snap_frames_to_grid((time * sr as f64) as u64, sr, bpm, &app.preferences, &app.project.markers);
+                let length_frames = sr as u64; // 1 second default
+                app.add_midi_clip(track_idx, start_frame, length_frames);
+            }
+            return;
         }
     }
 

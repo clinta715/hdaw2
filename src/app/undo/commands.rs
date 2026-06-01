@@ -186,14 +186,24 @@ pub fn apply_undo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoC
                 if effect_index < track.fx_chain.len() { track.fx_chain.remove(effect_index); }
             }
         }
-        UndoCommand::RemoveEffect { track_index, effect_index, ref serialized } => {
+        UndoCommand::RemoveEffect { track_index, effect_index, ref serialized, ref removed_lanes } => {
             if let Some(handle) = tracks.get_mut(track_index) {
                 let idx = effect_index.min(handle.fx_chain.len());
                 handle.fx_chain.insert(idx, recreate_effect(serialized, sample_rate));
+                for lane in removed_lanes {
+                    if !handle.automation_lanes.iter().any(|l| l.effect_instance_id == lane.effect_instance_id && l.param_id == lane.param_id) {
+                        handle.automation_lanes.push(lane.clone());
+                    }
+                }
             }
             if let Some(track) = project.tracks.get_mut(track_index) {
                 let idx = effect_index.min(track.fx_chain.len());
                 track.fx_chain.insert(idx, serialized.clone());
+                for lane in removed_lanes {
+                    if !track.automation_lanes.iter().any(|l| l.effect_instance_id == lane.effect_instance_id && l.param_id == lane.param_id) {
+                        track.automation_lanes.push(lane.clone());
+                    }
+                }
             }
         }
         UndoCommand::ToggleMute { track_index, old_value } => set_mute(tracks, project, track_index, old_value),
@@ -208,6 +218,7 @@ pub fn apply_undo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoC
             if let Some(track) = project.tracks.get_mut(track_index) {
                 if let Some(ClipKind::Midi(clip)) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Midi(m) if m.id == clip_id)) {
                     clip.notes.retain(|n| n.pitch != note.pitch || n.start_frame != note.start_frame || n.duration != note.duration);
+                    clip.thumb_dirty = true;
                 }
             }
             if let Some(handle) = tracks.get_mut(track_index) {
@@ -221,12 +232,33 @@ pub fn apply_undo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoC
                 if let Some(ClipKind::Midi(clip)) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Midi(m) if m.id == clip_id)) {
                     clip.notes.push(note.clone());
                     clip.notes.sort_by_key(|n| n.start_frame);
+                    clip.thumb_dirty = true;
                 }
             }
             if let Some(handle) = tracks.get_mut(track_index) {
                 if let Some(ch) = handle.clips.iter_mut().find(|c| c.clip_id == clip_id) {
                     ch.midi_notes.push(note.clone());
                     ch.midi_notes.sort_by_key(|n| n.start_frame);
+                }
+            }
+        }
+        UndoCommand::FadeClip { track_index, clip_id, old_fade_in, old_fade_out, .. } => {
+            if let Some(track) = project.tracks.get_mut(track_index) {
+                for clip in track.clips.iter_mut() {
+                    match clip {
+                        ClipKind::Audio(a) if a.id == clip_id => {
+                            a.fade_in_frames = old_fade_in;
+                            a.fade_out_frames = old_fade_out;
+                        }
+                        _ => continue,
+                    }
+                    break;
+                }
+            }
+            if let Some(handle) = tracks.get_mut(track_index) {
+                if let Some(ch) = handle.clips.iter().find(|c| c.clip_id == clip_id) {
+                    ch.fade_in_frames.store(old_fade_in, Ordering::Release);
+                    ch.fade_out_frames.store(old_fade_out, Ordering::Release);
                 }
             }
         }
@@ -257,7 +289,9 @@ pub fn apply_undo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoC
                 }
             }
         }
-        UndoCommand::AddTrack { .. } | UndoCommand::DeleteTrack { .. } => {}
+        UndoCommand::ImportAudio { .. } | UndoCommand::ImportMidi { .. }
+                 | UndoCommand::RecordAudio { .. }
+         | UndoCommand::AddTrack { .. } | UndoCommand::DeleteTrack { .. } => {}
     }
 }
 
@@ -319,14 +353,24 @@ pub fn apply_redo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoC
             }
         }
         UndoCommand::AddEffect { .. } => {}
-        UndoCommand::RemoveEffect { track_index, effect_index, ref serialized } => {
+        UndoCommand::RemoveEffect { track_index, effect_index, ref serialized, ref removed_lanes } => {
             if let Some(handle) = tracks.get_mut(track_index) {
                 let idx = effect_index.min(handle.fx_chain.len());
                 handle.fx_chain.insert(idx, recreate_effect(serialized, sample_rate));
+                for lane in removed_lanes {
+                    if !handle.automation_lanes.iter().any(|l| l.effect_instance_id == lane.effect_instance_id && l.param_id == lane.param_id) {
+                        handle.automation_lanes.push(lane.clone());
+                    }
+                }
             }
             if let Some(track) = project.tracks.get_mut(track_index) {
                 let idx = effect_index.min(track.fx_chain.len());
                 track.fx_chain.insert(idx, serialized.clone());
+                for lane in removed_lanes {
+                    if !track.automation_lanes.iter().any(|l| l.effect_instance_id == lane.effect_instance_id && l.param_id == lane.param_id) {
+                        track.automation_lanes.push(lane.clone());
+                    }
+                }
             }
         }
         UndoCommand::ToggleMute { track_index, old_value } => set_mute(tracks, project, track_index, !old_value),
@@ -342,6 +386,7 @@ pub fn apply_redo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoC
                 if let Some(ClipKind::Midi(clip)) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Midi(m) if m.id == clip_id)) {
                     clip.notes.push(note.clone());
                     clip.notes.sort_by_key(|n| n.start_frame);
+                    clip.thumb_dirty = true;
                 }
             }
             if let Some(handle) = tracks.get_mut(track_index) {
@@ -355,11 +400,32 @@ pub fn apply_redo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoC
             if let Some(track) = project.tracks.get_mut(track_index) {
                 if let Some(ClipKind::Midi(clip)) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Midi(m) if m.id == clip_id)) {
                     clip.notes.retain(|n| n.pitch != note.pitch || n.start_frame != note.start_frame || n.duration != note.duration);
+                    clip.thumb_dirty = true;
                 }
             }
             if let Some(handle) = tracks.get_mut(track_index) {
                 if let Some(ch) = handle.clips.iter_mut().find(|c| c.clip_id == clip_id) {
                     ch.midi_notes.retain(|n| n.pitch != note.pitch || n.start_frame != note.start_frame || n.duration != note.duration);
+                }
+            }
+        }
+        UndoCommand::FadeClip { track_index, clip_id, new_fade_in, new_fade_out, .. } => {
+            if let Some(track) = project.tracks.get_mut(track_index) {
+                for clip in track.clips.iter_mut() {
+                    match clip {
+                        ClipKind::Audio(a) if a.id == clip_id => {
+                            a.fade_in_frames = new_fade_in;
+                            a.fade_out_frames = new_fade_out;
+                        }
+                        _ => continue,
+                    }
+                    break;
+                }
+            }
+            if let Some(handle) = tracks.get_mut(track_index) {
+                if let Some(ch) = handle.clips.iter().find(|c| c.clip_id == clip_id) {
+                    ch.fade_in_frames.store(new_fade_in, Ordering::Release);
+                    ch.fade_out_frames.store(new_fade_out, Ordering::Release);
                 }
             }
         }
@@ -399,6 +465,8 @@ pub fn apply_redo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoC
                 }
             }
         }
-        UndoCommand::AddTrack { .. } | UndoCommand::DeleteTrack { .. } => {}
+        UndoCommand::ImportAudio { .. } | UndoCommand::ImportMidi { .. }
+        | UndoCommand::RecordAudio { .. }
+        | UndoCommand::AddTrack { .. } | UndoCommand::DeleteTrack { .. } => {}
     }
 }

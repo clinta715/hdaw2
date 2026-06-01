@@ -16,6 +16,8 @@ pub struct AutomationLane {
     pub points: Vec<AutomationPoint>,
     #[serde(skip)]
     pub dirty: bool,
+    #[serde(default)]
+    pub effect_instance_id: Option<uuid::Uuid>,
 }
 
 impl AutomationLane {
@@ -25,15 +27,30 @@ impl AutomationLane {
             param_name,
             points: Vec::new(),
             dirty: false,
+            effect_instance_id: None,
+        }
+    }
+
+    pub fn new_effect(param_id: u32, param_name: String, effect_id: uuid::Uuid) -> Self {
+        Self {
+            param_id,
+            param_name,
+            points: Vec::new(),
+            dirty: false,
+            effect_instance_id: Some(effect_id),
         }
     }
 
     pub fn volume_lane() -> Self {
-        Self::new(PARAM_VOLUME, "Volume".into())
+        let mut l = Self::new(PARAM_VOLUME, "Volume".into());
+        l.effect_instance_id = None;
+        l
     }
 
     pub fn pan_lane() -> Self {
-        Self::new(PARAM_PAN, "Pan".into())
+        let mut l = Self::new(PARAM_PAN, "Pan".into());
+        l.effect_instance_id = None;
+        l
     }
 
     pub fn add_point(&mut self, time_frames: u64, value: f32) {

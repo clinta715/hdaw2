@@ -19,6 +19,7 @@ egui-file-dialog = "0.8"
 clack-host = "0.1"
 clack-extensions = { version = "0.1", features = ["clack-host", "log", "params", "state", "audio-ports", "note-ports", "gui"] }
 base64 = "0.22"
+midly = "0.5"
 
 [profile.release]
 lto = true

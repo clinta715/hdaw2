@@ -5,6 +5,28 @@ use egui::{pos2, Color32, Pos2, Rect, Shape, Stroke};
 const POINT_RADIUS: f32 = 4.0;
 const HIT_RADIUS: f32 = 6.0;
 
+fn lane_color(lane: &AutomationLane) -> Color32 {
+    match lane.param_id {
+        PARAM_VOLUME => Color32::from_rgb(0x4c, 0xaf, 0x50),
+        PARAM_PAN => Color32::from_rgb(0x42, 0xa5, 0xf5),
+        _ => {
+            let palette = [
+                Color32::from_rgb(0xE9, 0x1E, 0x50),
+                Color32::from_rgb(0x00, 0x96, 0xD6),
+                Color32::from_rgb(0x9C, 0x27, 0xB0),
+                Color32::from_rgb(0xFF, 0x98, 0x00),
+                Color32::from_rgb(0x4C, 0xAF, 0x50),
+            ];
+            if let Some(eid) = lane.effect_instance_id {
+                let (low, _) = eid.as_u64_pair();
+                palette[(low as usize) % palette.len()]
+            } else {
+                palette[0]
+            }
+        }
+    }
+}
+
 pub fn draw(
     painter: &egui::Painter,
     lane_rect: &Rect,
@@ -13,11 +35,7 @@ pub fn draw(
     sr: u32,
 ) {
     for lane in lanes {
-        let color = match lane.param_id {
-            PARAM_VOLUME => Color32::from_rgb(0x4c, 0xaf, 0x50),
-            PARAM_PAN => Color32::from_rgb(0x42, 0xa5, 0xf5),
-            _ => Color32::from_rgb(0xaa, 0xaa, 0xaa),
-        };
+        let color = lane_color(lane);
         draw_lane(painter, lane_rect, lane, timeline, sr, color);
     }
 }
@@ -59,13 +77,15 @@ fn draw_lane(
         return;
     }
 
-    let shape = Shape::line(pts.clone(), Stroke::new(1.5, color));
+    // Move pts into the line shape
+    let circles = pts.clone(); // Still need them for circles, but we avoid one clone
+    let shape = Shape::line(pts, Stroke::new(1.5, color));
     painter.add(shape);
 
-    for pt in &pts {
-        painter.circle_filled(*pt, POINT_RADIUS, color);
+    for pt in circles {
+        painter.circle_filled(pt, POINT_RADIUS, color);
         painter.circle_stroke(
-            *pt,
+            pt,
             POINT_RADIUS,
             Stroke::new(1.0, Color32::from_gray(200)),
         );

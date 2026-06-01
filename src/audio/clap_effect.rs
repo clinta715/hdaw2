@@ -101,6 +101,13 @@ impl ClapEffectAdapter {
             false
         };
 
+        tracing::info!(
+            %plugin_id,
+            has_note_input,
+            num_params = param_infos.len(),
+            "CLAP plugin loaded"
+        );
+
         let state = ClapPluginState::new(
             plugin_id.to_string(),
             plugin_id.to_string(),
@@ -201,6 +208,10 @@ impl ClapEffectAdapter {
         };
 
         let Ok(started) = processor.ensure_processing_started() else {
+            tracing::warn!(
+                name = self.state.name(),
+                "ensure_processing_started failed — plugin will not produce audio"
+            );
             return;
         };
 
@@ -291,6 +302,19 @@ impl ClapEffectAdapter {
                 tracing::warn!("CLAP process error: {:?}", e);
             }
         });
+        drop(audio_outputs);
+        drop(audio_inputs);
+
+        if self.has_note_input {
+            let has_out = out_l_buf.iter().any(|&s| s.abs() > 1e-10)
+                || out_r_buf.iter().any(|&s| s.abs() > 1e-10);
+            if !has_out {
+                tracing::warn!(
+                    name = self.state.name(),
+                    "process() returned Ok but produced zero output despite being an instrument"
+                );
+            }
+        }
 
         let written = frames.min(out_l_buf.len());
         input_l[..written].copy_from_slice(&out_l_buf[..written]);

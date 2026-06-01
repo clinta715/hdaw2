@@ -12,7 +12,7 @@ use egui_file_dialog::FileDialog;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
-fn resample(samples: &[f32], channels: u16, from_sr: u32, to_sr: u32) -> Vec<f32> {
+pub(crate) fn resample(samples: &[f32], channels: u16, from_sr: u32, to_sr: u32) -> Vec<f32> {
     let from_frames = samples.len() / channels as usize;
     let to_frames = (from_frames as f64 * to_sr as f64 / from_sr as f64).round() as usize;
     let ratio = from_frames as f64 / to_frames as f64;
@@ -102,29 +102,43 @@ impl HdawApp {
         handle.add_clip(clip_handle);
 
         let track_ui = crate::app::TrackUiState {
+            id: handle.id,
             name: file_name.clone(),
             color: [0x1a, 0x2a, 0x1a],
             volume: handle.volume.clone(),
             pan: handle.pan.clone(),
             mute: handle.mute.clone(),
             solo: handle.solo.clone(),
+            armed: handle.armed.clone(),
             peak_left: handle.peak_left.clone(),
             peak_right: handle.peak_right.clone(),
+            parent_group: None,
+            is_group: false,
+            is_return: false,
+            collapsed: false,
+            send_levels: Vec::new(),
         };
 
-        self.track_ui.push(track_ui);
+        self.track_ui.push(track_ui.clone());
         self.engine.add_track(handle);
 
-        let mut track = Track::new(file_name);
-        track.add_clip(clip_kind);
-        self.project.add_track(track);
+        let mut project_track = Track::new(file_name);
+        project_track.add_clip(clip_kind);
+        self.project.add_track(project_track.clone());
+
+        // Push undo snapshot
+        let snapshot = crate::app::undo::ImportTrackSnapshot::new(project_track, track_ui);
+        self.undo_state.push(crate::app::undo::UndoCommand::ImportAudio {
+            tracks: vec![snapshot],
+        });
 
         tracing::info!("loaded audio file: {path}");
         Ok(())
     }
 
     pub fn sync_engine_to_project(&mut self) {
-        let snapshot: Vec<(f32, f32, bool, bool, Vec<Vec<crate::project::automation::AutomationPoint>>, Vec<SerializedEffect>, Vec<(uuid::Uuid, Vec<MidiNote>)>)> =
+        #[allow(clippy::type_complexity)]
+        let snapshot: Vec<(f32, f32, bool, bool, Vec<Vec<crate::project::automation::AutomationPoint>>, Vec<SerializedEffect>, Vec<(uuid::Uuid, Vec<MidiNote>)>, Option<uuid::Uuid>, bool, bool, Vec<crate::project::track::SendSlotDef>)> =
             self.engine.tracks.lock().ok().map(|tracks| {
                 tracks.iter().map(|handle| {
                     let vol = f32::from_bits(handle.volume.load(Ordering::Acquire));
@@ -147,16 +161,27 @@ impl HdawApp {
                     let clip_notes: Vec<(uuid::Uuid, Vec<MidiNote>)> = handle.clips.iter()
                         .map(|c| (c.clip_id, c.midi_notes.clone()))
                         .collect();
-                    (vol, pan, mute, solo, auto_points, fx, clip_notes)
+                    let sends: Vec<crate::project::track::SendSlotDef> = handle.sends.iter().map(|s| {
+                        crate::project::track::SendSlotDef {
+                            target_id: s.target_id,
+                            level: f32::from_bits(s.level.load(Ordering::Acquire)),
+                            pre_fader: s.pre_fader,
+                        }
+                    }).collect();
+                    (vol, pan, mute, solo, auto_points, fx, clip_notes, handle.parent_group, handle.is_group, handle.is_return, sends)
                 }).collect()
             }).unwrap_or_default();
 
-        for (ti, (vol, pan, mute, solo, auto_points, fx, clip_notes)) in snapshot.into_iter().enumerate() {
+        for (ti, (vol, pan, mute, solo, auto_points, fx, clip_notes, parent_group, is_group, is_return, sends)) in snapshot.into_iter().enumerate() {
             if let Some(track) = self.project.tracks.get_mut(ti) {
                 track.volume = vol;
                 track.pan = pan;
                 track.mute = mute;
                 track.solo = solo;
+                track.parent_group = parent_group;
+                track.is_group = is_group;
+                track.is_return = is_return;
+                track.sends = sends;
                 for (li, points) in auto_points.into_iter().enumerate() {
                     if let Some(lane) = track.automation_lanes.get_mut(li) {
                         if lane.points != points {
@@ -168,9 +193,30 @@ impl HdawApp {
                 for (clip_id, notes) in clip_notes {
                     if let Some(clip) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Midi(m) if m.id == clip_id)) {
                         if let ClipKind::Midi(m) = clip {
-                            m.notes = notes;
+                            if m.notes != notes {
+                                m.notes = notes;
+                                m.thumb_dirty = true;
+                            }
                         }
                     }
+                }
+            }
+        }
+
+        // Sync fade values from engine -> project
+        let fade_snapshot: Vec<(uuid::Uuid, u64, u64)> = self.engine.tracks.lock().ok().map(|tracks| {
+            tracks.iter().flat_map(|handle| {
+                handle.clips.iter().map(|ch| {
+                    (ch.clip_id, ch.fade_in_frames.load(Ordering::Acquire), ch.fade_out_frames.load(Ordering::Acquire))
+                }).collect::<Vec<_>>()
+            }).collect()
+        }).unwrap_or_default();
+        for (clip_id, fi, fo) in fade_snapshot {
+            for track in self.project.tracks.iter_mut() {
+                if let Some(ClipKind::Audio(a)) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Audio(ca) if ca.id == clip_id)) {
+                    a.fade_in_frames = fi;
+                    a.fade_out_frames = fo;
+                    break;
                 }
             }
         }
@@ -194,6 +240,8 @@ impl HdawApp {
         self.effect_editor_state.selected_effect = None;
         self.current_path = None;
         self.undo_state.clear();
+        self.midi_thumb_cache.clear();
+        self.waveform_cache.clear();
     }
 
     pub fn save_current_project(&mut self, path: &str) -> Result<(), String> {
@@ -215,7 +263,9 @@ impl HdawApp {
                     ClipKind::Audio(audio_clip) => {
                         let _ = audio_clip.reload_buffer();
                     }
-                    ClipKind::Midi(_) => {}
+                    ClipKind::Midi(midi_clip) => {
+                        midi_clip.thumb_dirty = true;
+                    }
                 }
             }
         }
@@ -227,6 +277,7 @@ impl HdawApp {
 
         for track in &self.project.tracks {
             let mut handle = TrackHandle::new();
+            handle.id = track.id;
 
             for clip in &track.clips {
                 match clip {
@@ -241,6 +292,8 @@ impl HdawApp {
                             clip_handle.set_position(audio_clip.position_frames);
                             clip_handle.set_offset(audio_clip.offset_frames);
                             clip_handle.set_length(audio_clip.length_frames);
+                            clip_handle.fade_in_frames.store(audio_clip.fade_in_frames, Ordering::Release);
+                            clip_handle.fade_out_frames.store(audio_clip.fade_out_frames, Ordering::Release);
                             handle.add_clip(clip_handle);
                         }
                     }
@@ -289,15 +342,29 @@ impl HdawApp {
                 handle.add_effect(instance);
             }
 
+            handle.parent_group = track.parent_group;
+            handle.is_group = track.is_group;
+            handle.is_return = track.is_return;
+            for sdef in &track.sends {
+                handle.sends.push(crate::project::track::SendSlot::new(sdef.target_id, sdef.level, sdef.pre_fader));
+            }
+
             let track_ui = crate::app::TrackUiState {
+                id: track.id,
                 name: track.name.clone(),
                 color: track.color,
                 volume: handle.volume.clone(),
                 pan: handle.pan.clone(),
                 mute: handle.mute.clone(),
                 solo: handle.solo.clone(),
+                armed: handle.armed.clone(),
                 peak_left: handle.peak_left.clone(),
                 peak_right: handle.peak_right.clone(),
+                parent_group: track.parent_group,
+                is_group: track.is_group,
+                is_return: track.is_return,
+                collapsed: false,
+                send_levels: handle.sends.iter().map(|s| s.level.clone()).collect(),
             };
 
             handle.volume.store(f32::to_bits(track.volume), Ordering::Release);

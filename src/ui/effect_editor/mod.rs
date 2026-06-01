@@ -3,8 +3,8 @@ mod eq_graph;
 use crate::app::HdawApp;
 use crate::audio::effects::create_effect;
 use crate::audio::effects::dsp_effect::{EffectInstance, EffectType};
+use crate::project::automation::AutomationLane;
 use egui::{Color32, Context, SidePanel, Slider, Vec2};
-
 use eq_graph::{FxData, ParamData};
 
 pub struct EffectEditorState {
@@ -85,7 +85,8 @@ fn write_param(app: &mut HdawApp, track_idx: usize, effect_idx: usize, param_id:
 }
 
 fn remove_effect(app: &mut HdawApp, track_idx: usize, effect_idx: usize) {
-    let serialized = if let Ok(mut ts) = app.engine.tracks.lock() {
+    let result = if let Ok(mut ts) = app.engine.tracks.lock() {
+        let effect_id = ts.get(track_idx).and_then(|t| t.fx_chain.get(effect_idx)).map(|inst| inst.id);
         let serialized = ts.get(track_idx).and_then(|t| {
             t.fx_chain.get(effect_idx).map(|inst| {
                 let pv: Vec<f32> = inst.parameter_info().iter()
@@ -101,20 +102,42 @@ fn remove_effect(app: &mut HdawApp, track_idx: usize, effect_idx: usize) {
         if let Some(t) = ts.get_mut(track_idx) {
             t.remove_effect(effect_idx);
         }
-        serialized
+        // Collect and remove automation lanes for this effect
+        let removed_lanes: Vec<AutomationLane> = if let Some(eid) = effect_id {
+            ts.get_mut(track_idx).map(|t| {
+                let mut lanes: Vec<AutomationLane> = Vec::new();
+                t.automation_lanes.retain(|l| {
+                    if l.effect_instance_id == Some(eid) {
+                        lanes.push(l.clone());
+                        false
+                    } else {
+                        true
+                    }
+                });
+                lanes
+            }).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        (serialized, removed_lanes, effect_id)
     } else {
-        None
+        return;
     };
+    let (serialized, removed_lanes, effect_id) = result;
     if let Some(s) = serialized {
         if let Some(track) = app.project.tracks.get_mut(track_idx) {
             if effect_idx < track.fx_chain.len() {
                 track.fx_chain.remove(effect_idx);
+            }
+            if let Some(eid) = effect_id {
+                track.automation_lanes.retain(|l| l.effect_instance_id != Some(eid));
             }
         }
         app.undo_state.push(crate::app::undo::UndoCommand::RemoveEffect {
             track_index: track_idx,
             effect_index: effect_idx,
             serialized: s,
+            removed_lanes,
         });
     }
 }
@@ -193,10 +216,17 @@ pub fn render(ctx: &Context, app: &mut HdawApp) {
         _ => {
             SidePanel::right("effect_editor")
                 .resizable(true)
-                .default_width(280.0)
+                .default_width(app.preferences.effect_panel_width)
                 .min_width(200.0)
                 .show(ctx, |ui| {
-                    ui.heading("FX Editor");
+                    ui.horizontal(|ui| {
+                        ui.heading("FX Editor");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("\u{2715}").clicked() {
+                                app.effect_editor_state.show_editor = false;
+                            }
+                        });
+                    });
                     ui.separator();
                     ui.colored_label(Color32::from_gray(120), "No track selected.\nClick a track header to begin.");
                 });
@@ -248,10 +278,17 @@ pub fn render(ctx: &Context, app: &mut HdawApp) {
 
     SidePanel::right("effect_editor")
         .resizable(true)
-        .default_width(280.0)
+        .default_width(app.preferences.effect_panel_width)
         .min_width(200.0)
         .show(ctx, |ui| {
-            ui.heading("FX Editor");
+            ui.horizontal(|ui| {
+                ui.heading("FX Editor");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("\u{2715}").clicked() { // Cross symbol
+                        app.effect_editor_state.show_editor = false;
+                    }
+                });
+            });
             ui.label(format!("Track: {track_name}"));
             ui.separator();
 
@@ -308,13 +345,58 @@ pub fn render(ctx: &Context, app: &mut HdawApp) {
 
                 ui.separator();
 
+                let inst_id = if let Ok(ts) = app.engine.tracks.lock() {
+                    ts.get(track_idx).and_then(|t| t.fx_chain.get(ei)).map(|inst| inst.id)
+                } else {
+                    None
+                };
+
                 for p in &fx.params {
-                    let mut v = p.value;
-                    if ui.add(Slider::new(&mut v, p.min..=p.max).text(&p.name)).changed() {
-                        write_param(app, track_idx, ei, p.id, v);
-                        dirty = true;
-                        return;
-                    }
+                    ui.horizontal(|ui| {
+                        let mut v = p.value;
+                        if ui.add(Slider::new(&mut v, p.min..=p.max).text(&p.name)).changed() {
+                            write_param(app, track_idx, ei, p.id, v);
+                            dirty = true;
+                            return;
+                        }
+                        // "A" automate toggle
+                        if let Some(inst_id) = inst_id {
+                            let has_lane = if let Ok(ts) = app.engine.tracks.lock() {
+                                ts.get(track_idx).map(|t| {
+                                    t.automation_lanes.iter().any(|l| l.effect_instance_id == Some(inst_id) && l.param_id == p.id)
+                                }).unwrap_or(false)
+                            } else {
+                                false
+                            };
+                            let label = if has_lane { "A" } else { "a" };
+                            let btn_color = if has_lane { Color32::from_rgb(0x6a, 0xaa, 0x3a) } else { Color32::from_gray(80) };
+                            if ui.add(egui::Button::new(label).fill(btn_color).min_size(egui::vec2(20.0, 18.0))).clicked() {
+                                if has_lane {
+                                    // Remove lane from both models
+                                    if let Ok(mut ts) = app.engine.tracks.lock() {
+                                        if let Some(t) = ts.get_mut(track_idx) {
+                                            t.automation_lanes.retain(|l| !(l.effect_instance_id == Some(inst_id) && l.param_id == p.id));
+                                        }
+                                    }
+                                    if let Some(track) = app.project.tracks.get_mut(track_idx) {
+                                        track.automation_lanes.retain(|l| !(l.effect_instance_id == Some(inst_id) && l.param_id == p.id));
+                                    }
+                                } else {
+                                    // Create lane in both models
+                                    let lane = AutomationLane::new_effect(p.id, p.name.clone(), inst_id);
+                                    if let Ok(mut ts) = app.engine.tracks.lock() {
+                                        if let Some(t) = ts.get_mut(track_idx) {
+                                            t.automation_lanes.push(lane.clone());
+                                        }
+                                    }
+                                    if let Some(track) = app.project.tracks.get_mut(track_idx) {
+                                        track.automation_lanes.push(lane);
+                                    }
+                                }
+                                dirty = true;
+                            }
+                        }
+                    });
                 }
             }
         });

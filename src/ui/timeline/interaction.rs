@@ -12,12 +12,38 @@ pub fn handle_drag_end_snap(response: &Response, app: &mut HdawApp) {
             let old_pos = drag.original_position_frames;
             let old_off = drag.original_offset_frames;
             let old_len = drag.original_length_frames;
+            let old_fi = drag.original_fade_in;
+            let old_fo = drag.original_fade_out;
+
+            match drag.mode {
+                DragMode::FadeIn | DragMode::FadeOut => {
+                    if let Some(track) = app.project.tracks.get(drag.track_index) {
+                        if let Some(ClipKind::Audio(clip)) = track.clips.iter().find(|c| matches!(c, ClipKind::Audio(a) if a.id == drag.clip_id)) {
+                            let new_fi = clip.fade_in_frames;
+                            let new_fo = clip.fade_out_frames;
+                            if old_fi != new_fi || old_fo != new_fo {
+                                app.undo_state.push(crate::app::undo::UndoCommand::FadeClip {
+                                    track_index: drag.track_index,
+                                    clip_id: drag.clip_id,
+                                    old_fade_in: old_fi,
+                                    old_fade_out: old_fo,
+                                    new_fade_in: new_fi,
+                                    new_fade_out: new_fo,
+                                });
+                            }
+                        }
+                    }
+                    return;
+                }
+                _ => {}
+            }
 
             if app.timeline_state.snap_enabled {
                 let sr = app.engine.transport.sample_rate();
+                let bpm = app.project.bpm;
                 if let Some(track) = app.project.tracks.get_mut(drag.track_index) {
                     if let Some(ClipKind::Audio(clip)) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Audio(a) if a.id == drag.clip_id)) {
-                        let snapped = app.timeline_state.snap_frames_to_grid(clip.position_frames, sr);
+                        let snapped = app.timeline_state.snap_frames_to_grid(clip.position_frames, sr, bpm, &app.preferences, &app.project.markers);
                         let delta = snapped as i64 - clip.position_frames as i64;
                         if delta != 0 {
                             clip.position_frames = snapped;
@@ -80,7 +106,8 @@ pub fn handle_seek_click(response: &Response, ui: &Ui, rect: &Rect, sr: u32, app
                     + app.timeline_state.scroll_x;
                 let time = timeline_x / app.timeline_state.pixels_per_second;
                 if time >= 0.0 {
-                    let frame = app.timeline_state.snap_frames_to_grid((time * sr as f64) as u64, sr);
+                    let bpm = app.project.bpm;
+                    let frame = app.timeline_state.snap_frames_to_grid((time * sr as f64) as u64, sr, bpm, &app.preferences, &app.project.markers);
                     app.seek_requested = true;
                     app.seek_frame = frame;
                     app.timeline_state.selected_clip_id = None;
@@ -172,16 +199,36 @@ pub fn handle_track_header_interaction(response: &Response, ui: &Ui, rect: &Rect
                 return;
             }
 
-            if response.clicked() {
-                let track_count = app.track_ui.len();
-                for i in 0..track_count {
-                    let track_y = rect.top() + RULER_HEIGHT + i as f32 * track_height
-                        + app.timeline_state.scroll_y as f32;
-                    let header_rect = Rect::from_min_size(
-                        pos2(rect.left(), track_y),
-                        vec2(header_width, track_height),
-                    );
-                    let action = track_headers::hit_test(&header_rect, pos);
+            let track_count = app.track_ui.len();
+            for i in 0..track_count {
+                let track_y = rect.top() + RULER_HEIGHT + i as f32 * track_height
+                    + app.timeline_state.scroll_y as f32;
+                let header_rect = Rect::from_min_size(
+                    pos2(rect.left(), track_y),
+                    vec2(header_width, track_height),
+                );
+
+                if !header_rect.contains(pos) { continue; }
+
+                if response.dragged_by(egui::PointerButton::Primary) {
+                    let action = track_headers::hit_test(&header_rect, pos, app.track_ui[i].is_group, app.track_ui[i].is_return);
+                    match action {
+                        track_headers::HeaderAction::Volume => {
+                            let v_rect = track_headers::volume_rect(&header_rect);
+                            let val = ((pos.x - v_rect.left()) / v_rect.width()).clamp(0.0, 1.0);
+                            app.track_ui[i].volume.store(val.to_bits(), Ordering::Release);
+                        }
+                        track_headers::HeaderAction::Pan => {
+                            let p_rect = track_headers::pan_rect(&header_rect);
+                            let val = ((pos.x - p_rect.left()) / p_rect.width()).clamp(0.0, 1.0);
+                            app.track_ui[i].pan.store(val.to_bits(), Ordering::Release);
+                        }
+                        _ => {}
+                    }
+                }
+
+                if response.clicked() {
+                    let action = track_headers::hit_test(&header_rect, pos, app.track_ui[i].is_group, app.track_ui[i].is_return);
                     match action {
                         track_headers::HeaderAction::ToggleMute => {
                             app.toggle_track_mute(i);
@@ -189,15 +236,19 @@ pub fn handle_track_header_interaction(response: &Response, ui: &Ui, rect: &Rect
                         track_headers::HeaderAction::ToggleSolo => {
                             app.toggle_track_solo(i);
                         }
+                        track_headers::HeaderAction::ToggleArm => {
+                            app.toggle_track_arm(i);
+                        }
+                        track_headers::HeaderAction::ToggleCollapse => {
+                            app.track_ui[i].collapsed ^= true;
+                        }
                         track_headers::HeaderAction::Select => {
                             app.select_track(i);
                         }
-                        track_headers::HeaderAction::None => {}
-                    }
-                    if !matches!(action, track_headers::HeaderAction::None) {
-                        break;
+                        _ => {}
                     }
                 }
+                break;
             }
         }
     }

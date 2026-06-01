@@ -7,6 +7,30 @@ use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::Arc;
 use uuid::Uuid;
 
+#[derive(Debug, Clone)]
+pub struct SendSlot {
+    pub target_id: Uuid,
+    pub level: Arc<AtomicU32>,
+    pub pre_fader: bool,
+}
+
+impl SendSlot {
+    pub fn new(target_id: Uuid, level: f32, pre_fader: bool) -> Self {
+        Self {
+            target_id,
+            level: Arc::new(AtomicU32::new(level.to_bits())),
+            pre_fader,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SendSlotDef {
+    pub target_id: Uuid,
+    pub level: f32,
+    pub pre_fader: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SerializedEffect {
     pub name: String,
@@ -16,6 +40,7 @@ pub struct SerializedEffect {
 }
 
 pub struct TrackHandle {
+    pub id: Uuid,
     pub volume: Arc<AtomicU32>,
     pub pan: Arc<AtomicU32>,
     pub mute: Arc<AtomicBool>,
@@ -25,11 +50,17 @@ pub struct TrackHandle {
     pub clips: Vec<ClipHandle>,
     pub fx_chain: Vec<EffectInstance>,
     pub automation_lanes: Vec<AutomationLane>,
+    pub armed: Arc<AtomicBool>,
+    pub parent_group: Option<Uuid>,
+    pub is_group: bool,
+    pub is_return: bool,
+    pub sends: Vec<SendSlot>,
 }
 
 impl TrackHandle {
     pub fn new() -> Self {
         Self {
+            id: Uuid::new_v4(),
             volume: Arc::new(AtomicU32::new(f32::to_bits(1.0))),
             pan: Arc::new(AtomicU32::new(f32::to_bits(0.0))),
             mute: Arc::new(AtomicBool::new(false)),
@@ -39,6 +70,11 @@ impl TrackHandle {
             clips: Vec::new(),
             fx_chain: Vec::new(),
             automation_lanes: vec![AutomationLane::volume_lane(), AutomationLane::pan_lane()],
+            armed: Arc::new(AtomicBool::new(false)),
+            parent_group: None,
+            is_group: false,
+            is_return: false,
+            sends: Vec::new(),
         }
     }
 
@@ -79,6 +115,14 @@ pub struct Track {
     pub clips: Vec<ClipKind>,
     pub automation_lanes: Vec<AutomationLane>,
     pub fx_chain: Vec<SerializedEffect>,
+    #[serde(default)]
+    pub parent_group: Option<Uuid>,
+    #[serde(default)]
+    pub is_group: bool,
+    #[serde(default)]
+    pub is_return: bool,
+    #[serde(default)]
+    pub sends: Vec<SendSlotDef>,
 }
 
 impl Track {
@@ -94,11 +138,41 @@ impl Track {
             clips: Vec::new(),
             automation_lanes: vec![AutomationLane::volume_lane(), AutomationLane::pan_lane()],
             fx_chain: Vec::new(),
+            parent_group: None,
+            is_group: false,
+            is_return: false,
+            sends: Vec::new(),
         }
+    }
+
+    pub fn new_group(name: String) -> Self {
+        let mut t = Self::new(name);
+        t.is_group = true;
+        t
+    }
+
+    pub fn new_return(name: String) -> Self {
+        let mut t = Self::new(name);
+        t.is_return = true;
+        t
     }
 
     pub fn add_clip(&mut self, clip: ClipKind) {
         self.clips.push(clip);
+    }
+}
+
+impl TrackHandle {
+    pub fn new_group() -> Self {
+        let mut t = Self::new();
+        t.is_group = true;
+        t
+    }
+
+    pub fn new_return() -> Self {
+        let mut t = Self::new();
+        t.is_return = true;
+        t
     }
 }
 

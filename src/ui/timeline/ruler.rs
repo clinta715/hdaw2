@@ -1,4 +1,5 @@
 use crate::project::marker::Marker;
+use crate::project::tempo_event::{TempoEvent, TimeSigEvent, frames_to_beats, beats_to_frames};
 use crate::ui::timeline::{TimelineState, RULER_HEIGHT};
 use egui::{pos2, vec2, Color32, Rect, Stroke};
 
@@ -11,21 +12,51 @@ pub fn draw(
     loop_out: Option<u64>,
     loop_enabled: bool,
     sample_rate: u32,
+    bpm: f64,
+    tempo_events: &[TempoEvent],
+    _time_sig_events: &[TimeSigEvent],
+    prefs: &crate::ui::preferences::PreferencesState,
 ) {
     let ruler_rect = Rect::from_min_size(rect.min, vec2(rect.width(), RULER_HEIGHT));
     let ruler_bg = Color32::from_rgb(0x2a, 0x2a, 0x2a);
     painter.rect_filled(ruler_rect, 0.0, ruler_bg);
 
     let pps = state.pixels_per_second;
-    let step = state.grid_step_secs();
+    let sr = sample_rate as f64;
 
-    let start_time = (state.scroll_x / pps).max(0.0);
-    let end_time = (state.scroll_x + rect.width() as f64) / pps;
+    // Use tempo_events if available, otherwise single BPM
+    let events = if tempo_events.is_empty() {
+        &[]
+    } else {
+        tempo_events
+    };
 
-    // Draw loop region overlay
+    let use_tempo_track = !events.is_empty();
+
+    // Visible range in frames
+    let start_secs = state.scroll_x / pps;
+    let end_secs = (state.scroll_x + rect.width() as f64) / pps;
+    let start_frame = (start_secs * sr).max(0.0) as u64;
+    let end_frame = (end_secs * sr) as u64;
+
+    // Tempo-aware beat range
+    let start_beat = if use_tempo_track {
+        frames_to_beats(start_frame, events, sample_rate)
+    } else {
+        let bps = bpm / 60.0;
+        start_secs * bps
+    };
+
+    let end_beat = if use_tempo_track {
+        frames_to_beats(end_frame, events, sample_rate)
+    } else {
+        let bps = bpm / 60.0;
+        end_secs * bps
+    };
+
+    // Loop region
     if loop_enabled {
         if let (Some(in_f), Some(out_f)) = (loop_in, loop_out) {
-            let sr = sample_rate as f64;
             let in_secs = in_f as f64 / sr;
             let out_secs = out_f as f64 / sr;
             let in_x = rect.left() + (in_secs * pps - state.scroll_x) as f32;
@@ -37,70 +68,91 @@ pub fn draw(
                 if r > l {
                     painter.rect_filled(loop_rect, 0.0, Color32::from_rgba_premultiplied(0x44, 0x88, 0xcc, 40));
                 }
-                // Loop handle triangles
                 let handle_size = 8.0;
-                // In handle
-                painter.line_segment(
-                    [pos2(in_x, rect.top()), pos2(in_x + handle_size, rect.top() + handle_size)],
-                    Stroke::new(2.0, Color32::from_rgb(0x44, 0x88, 0xcc)),
-                );
-                painter.line_segment(
-                    [pos2(in_x, rect.top() + RULER_HEIGHT), pos2(in_x + handle_size, rect.top() + RULER_HEIGHT - handle_size)],
-                    Stroke::new(2.0, Color32::from_rgb(0x44, 0x88, 0xcc)),
-                );
-                // Out handle
-                painter.line_segment(
-                    [pos2(out_x, rect.top()), pos2(out_x - handle_size, rect.top() + handle_size)],
-                    Stroke::new(2.0, Color32::from_rgb(0x44, 0x88, 0xcc)),
-                );
-                painter.line_segment(
-                    [pos2(out_x, rect.top() + RULER_HEIGHT), pos2(out_x - handle_size, rect.top() + RULER_HEIGHT - handle_size)],
-                    Stroke::new(2.0, Color32::from_rgb(0x44, 0x88, 0xcc)),
-                );
+                painter.line_segment([pos2(in_x, rect.top()), pos2(in_x + handle_size, rect.top() + handle_size)], Stroke::new(2.0, Color32::from_rgb(0x44, 0x88, 0xcc)));
+                painter.line_segment([pos2(in_x, rect.top() + RULER_HEIGHT), pos2(in_x + handle_size, rect.top() + RULER_HEIGHT - handle_size)], Stroke::new(2.0, Color32::from_rgb(0x44, 0x88, 0xcc)));
+                painter.line_segment([pos2(out_x, rect.top()), pos2(out_x - handle_size, rect.top() + handle_size)], Stroke::new(2.0, Color32::from_rgb(0x44, 0x88, 0xcc)));
+                painter.line_segment([pos2(out_x, rect.top() + RULER_HEIGHT), pos2(out_x - handle_size, rect.top() + RULER_HEIGHT - handle_size)], Stroke::new(2.0, Color32::from_rgb(0x44, 0x88, 0xcc)));
             }
         }
     }
 
-    // Draw ticks
-    let first_tick = (start_time / step).ceil() * step;
-    let mut t = first_tick;
+    // Draw musical ticks
+    let step = state.beat_step(if use_tempo_track { tempo_at_event(events, start_frame) } else { bpm }, prefs.grid_division);
+    let first_tick = (start_beat / step).ceil() * step;
     let font_id = egui::FontId::proportional(10.0);
-    while t <= end_time {
-        let x = rect.left() + (t * pps - state.scroll_x) as f32;
+    let mut beat = first_tick;
+    while beat <= end_beat {
+        // Convert beat to pixel x
+        let x = if use_tempo_track {
+            let f = beats_to_frames(beat, events, sample_rate);
+            let secs = f as f64 / sr;
+            rect.left() + (secs * pps - state.scroll_x) as f32
+        } else {
+            let secs = beat * 60.0 / bpm;
+            rect.left() + (secs * pps - state.scroll_x) as f32
+        };
         if x < rect.left() || x > rect.right() {
-            t += step;
+            beat += step;
             continue;
         }
-        let is_major = ((t / step).round() as i64) % 2 == 0;
-        let tick_h = if is_major { 12.0 } else { 6.0 };
+
+        // Determine time sig for this beat
+        let num = if use_tempo_track {
+            let f = beats_to_frames(beat, events, sample_rate);
+            crate::project::tempo_event::time_sig_at(&[], f).0 as f64
+        } else {
+            4.0
+        };
+
+        let is_bar = (beat / num).fract().abs() < 0.001;
+        let is_beat_tick = (beat / 1.0).fract().abs() < 0.001;
+
+        let tick_h = if is_bar { 14.0 } else if is_beat_tick { 8.0 } else { 4.0 };
         let tick_y = rect.top() + RULER_HEIGHT - tick_h;
-        let color = Color32::from_gray(120);
+        let color = if is_bar { Color32::from_gray(180) } else { Color32::from_gray(100) };
+
         painter.line_segment(
             [pos2(x, tick_y), pos2(x, rect.top() + RULER_HEIGHT)],
             Stroke::new(1.0, color),
         );
-        if is_major {
-            let mins = (t / 60.0) as u32;
-            let secs = (t % 60.0) as u32;
-            let label = format!("{:02}:{:02}", mins, secs);
+
+        if is_bar || (is_beat_tick && step >= 1.0) {
+            let bar = (beat / num).floor() as u32 + 1;
+            let beat_in_bar = (beat % num).floor() as u32 + 1;
+            let label = if is_bar { format!("{}", bar) } else { format!("{}.{}", bar, beat_in_bar) };
             painter.text(
                 pos2(x + 2.0, rect.top() + 2.0),
                 egui::Align2::LEFT_TOP,
                 label,
                 font_id.clone(),
-                Color32::from_gray(180),
+                if is_bar { Color32::from_gray(220) } else { Color32::from_gray(150) },
             );
         }
-        t += step;
+        beat += step;
+    }
+
+    // Draw tempo change indicators
+    if use_tempo_track {
+        for event in events {
+            let secs = event.position_frames as f64 / sr;
+            let x = rect.left() + (secs * pps - state.scroll_x) as f32;
+            if x < rect.left() || x > rect.right() {
+                continue;
+            }
+            // Small colored marker at top
+            painter.line_segment(
+                [pos2(x, rect.top()), pos2(x, rect.top() + 4.0)],
+                Stroke::new(2.0, Color32::from_rgb(0xcc, 0x88, 0x44)),
+            );
+        }
     }
 
     // Draw markers
-    let sr = sample_rate as f64;
     for marker in markers {
         let pos_secs = marker.position_frames as f64 / sr;
         let x = rect.left() + (pos_secs * pps - state.scroll_x) as f32;
         if x < rect.left() || x > rect.right() { continue; }
-        // Diamond flag
         let mid_y = rect.top() + RULER_HEIGHT / 2.0;
         let size = 4.0;
         painter.add(egui::Shape::convex_polygon(
@@ -113,7 +165,6 @@ pub fn draw(
             Color32::from_rgb(marker.color[0], marker.color[1], marker.color[2]),
             Stroke::new(0.0, Color32::TRANSPARENT),
         ));
-        // Label
         if x + 4.0 < rect.right() {
             painter.text(
                 pos2(x + 4.0, rect.top() + 2.0),
@@ -124,4 +175,8 @@ pub fn draw(
             );
         }
     }
+}
+
+fn tempo_at_event(events: &[TempoEvent], frame: u64) -> f64 {
+    crate::project::tempo_event::tempo_at(events, frame)
 }

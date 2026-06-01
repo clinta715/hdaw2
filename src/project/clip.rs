@@ -14,6 +14,10 @@ pub struct AudioClip {
     pub offset_frames: u64,
     pub length_frames: u64,
     pub gain: f32,
+    #[serde(default)]
+    pub fade_in_frames: u64,
+    #[serde(default)]
+    pub fade_out_frames: u64,
     pub source_path: Option<PathBuf>,
     #[serde(skip)]
     pub buffer: Option<AudioBuffer>,
@@ -32,6 +36,8 @@ impl AudioClip {
             offset_frames: 0,
             length_frames: frames,
             gain: 1.0,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
             source_path: None,
             buffer: Some(buffer),
             waveform_peaks: Some(Arc::new(peaks)),
@@ -48,6 +54,8 @@ impl AudioClip {
             offset_frames: 0,
             length_frames: frames,
             gain: 1.0,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
             source_path: Some(source_path),
             buffer: Some(buffer),
             waveform_peaks: Some(Arc::new(peaks)),

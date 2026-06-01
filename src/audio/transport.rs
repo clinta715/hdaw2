@@ -17,6 +17,10 @@ pub struct Transport {
     pub loop_enabled: AtomicBool,
     loop_region: AtomicU64,
     pub seek_occurred: AtomicBool,
+    pub bpm: AtomicU32,
+    pub time_signature_num: AtomicU32,
+    pub time_signature_den: AtomicU32,
+    pub metronome_enabled: AtomicBool,
 }
 
 impl Transport {
@@ -28,6 +32,10 @@ impl Transport {
             loop_enabled: AtomicBool::new(false),
             loop_region: AtomicU64::new(pack_loop_region(0, 0)),
             seek_occurred: AtomicBool::new(false),
+            bpm: AtomicU32::new(f32::to_bits(120.0)),
+            time_signature_num: AtomicU32::new(4),
+            time_signature_den: AtomicU32::new(4),
+            metronome_enabled: AtomicBool::new(false),
         }
     }
 
@@ -95,5 +103,34 @@ impl Transport {
     pub fn store_loop_out(&self, out_frame: u64) {
         let (in_frame, _) = self.load_loop_region();
         self.set_loop_region(in_frame, out_frame);
+    }
+
+    pub fn bpm(&self) -> f64 {
+        f64::from(f32::from_bits(self.bpm.load(Ordering::Acquire)))
+    }
+
+    pub fn set_bpm(&self, bpm: f64) {
+        self.bpm.store(f32::to_bits(bpm as f32), Ordering::Release);
+    }
+
+    pub fn time_sig_num(&self) -> u32 {
+        self.time_signature_num.load(Ordering::Acquire)
+    }
+
+    pub fn set_time_sig_num(&self, n: u32) {
+        self.time_signature_num.store(n, Ordering::Release);
+    }
+
+    pub fn time_sig_den(&self) -> u32 {
+        self.time_signature_den.load(Ordering::Acquire)
+    }
+
+    pub fn set_time_sig_den(&self, d: u32) {
+        self.time_signature_den.store(d, Ordering::Release);
+    }
+
+    pub fn toggle_metronome(&self) {
+        let current = self.metronome_enabled.load(Ordering::Acquire);
+        self.metronome_enabled.store(!current, Ordering::Release);
     }
 }

@@ -56,6 +56,33 @@ Two parallel data models must be manually kept in sync:
 - Local-override: automation curves don't overwrite atomics; result used locally per buffer
 - **Dirty flag pattern**: `AutomationLane.dirty: bool` (`#[serde(skip)]`) — set on mutation (`add_point`, `remove_point`, drag), checked by `sync_automation_to_project` to skip redundant deep-clones
 
+### Audio Routing Architecture (Phase 5)
+- **Track types**: Normal (source clips), Group (accumulator busses), Return (send FX busses)
+- **Data model**: `SendSlot` on `TrackHandle` (engine), `SendSlotDef` on `Track` (project); `parent_group: Option<Uuid>`, `is_group: bool`, `is_return: bool`
+- **Multi-pass pipeline** in `mix_tracks()`:
+  - **Pass 1 (Source)**: Process normal tracks via `process_track()`, route post-fader to master or group accumulators, route sends to return accumulators
+  - **Pass 2 (Group)**: Kahn's algorithm for topological group processing (child before parent), apply FX chain on group accumulators, route to master or parent group
+  - **Pass 3 (Return)**: Apply FX chain on return accumulators, route to master
+  - **Pass 4 (Master+Metronome)**: `master_bus.process()` + metronome click → interleave to output
+- **Pre-fader sends**: Copy raw clip sum (`PRE_FADER_L/R`) before track volume/pan/FX
+- **Post-fader sends**: Copy after track volume/pan/FX chain
+- **Group accelerators**: per-group `Vec<f32>` accumulators in thread-local `GROUP_ACCUM_L/R`
+- **Return accelerators**: per-return `Vec<f32>` accumulators in thread-local `RETURN_ACCUM_L/R`
+- **Cycle detection**: DFS following `parent_group` links from target, rejecting if source track UUID is encountered
+- **Adding a return track** auto-creates `SendSlot` (level 0.0, post-fader) on every existing track + engine TrackHandle + TrackUiState
+- **Collapse**: Group tracks can be collapsed/expanded; child tracks hidden-by-collapse via parent-group chain walk in `render_tracks`
+- **Group color**: gold tint bg; **Return color**: purple tint bg; clips not drawn on group/return tracks
+- **Routing dropdown**: Mixer panel shows parent_group selector (groups + Master) and sends section (up to 4 visible sliders)
+
+### Effect Parameter Automation (Tier 2)
+- **Data model**: `AutomationLane.effect_instance_id: Option<Uuid>` with `#[serde(default)]` — links lane to a specific effect instance
+- **Lane lifecycle**: Created/destroyed via 'A' toggle button per parameter in effect editor; auto-deleted when effect is removed
+- **Audio evaluation**: `process_track()` iterates automation lanes with `effect_instance_id`, finds matching effect by UUID, calls `inst.set_parameter(lane.param_id, lane.get_value_at(pos_frames))` before the FX chain loop
+- **Parameter lookup**: Uses `lane.get_value_at()` directly (not param_id search) since the same param_id can appear in different effects; only evaluates if `!val.is_nan()`
+- **Undo**: `UndoCommand::RemoveEffect.removed_lanes: Vec<AutomationLane>` — both `apply_undo`/`apply_redo` restore lanes alongside the effect instance
+- **Lane color**: Per-lane color for effect-param lanes derived from UUID hash into a 5-color palette (distinct from green=volume, blue=pan)
+- **All lanes overlaid**: Effect-param lanes render overlaid in timeline alongside Volume and Pan (not stacked)
+
 ### MIDI Architecture (v0.3.0)
 - **Data model**: `MidiNote` (pitch, velocity, start_frame, duration) + `MidiClip` (id, name, position/length, notes, color)
 - **ClipKind enum**: `ClipKind::Audio(AudioClip) | ClipKind::Midi(MidiClip)` unifies both clip types on the project model
@@ -66,18 +93,23 @@ Two parallel data models must be manually kept in sync:
 - **Instrument slot**: first effect in FX chain with `has_note_input == true`; skipped in standard FX loop
 - **Piano roll**: `ui/piano_roll.rs` — grid editor with note add (left-click), delete (right-click), playhead indicator
 - **Sync**: `add_midi_note` / `remove_midi_note` / `add_midi_clip` in `commands.rs` update both project and engine models, push undo commands
-- **Event sorting**: MIDI events sorted by sample offset using `Vec::sort()` on the EventBuffer before dispatch
+- **Event sorting**: MIDI events sorted by sample offset using `EventBuffer::sort()` which uses `sort_unstable_by_key` (no heap alloc). **Critical**: Unstable sort means NoteOn and NoteOff at the same offset can reorder. During seeks, NoteOff cleanup and NoteOn restart both land at offset 0 — NoteOn is deliberately bumped to offset 1 to prevent reordering.
+- **CLAP activation pattern**: `instance.activate(|_, _| (), config)` creates a no-op `AudioProcessor` handler (no audio-thread host callbacks). This is the **correct and documented pattern** from clack_host examples. Audio ports are registered independently at `process()` call time via `AudioPorts.with_input_buffers()` / `.with_output_buffers()`.
+- **`ensure_processing_started()`**: Called on first `process()`. If the plugin's C `start_processing()` returns false, this fails silently — the code now logs a `tracing::warn!`. This is a common failure point for misbehaving CLAP plugins.
+- **MIDI diagnostics**: Tracing at `tracing::debug!` level in `process_track()` (instrument detection, event count per buffer, output verification) and `clap_effect.rs` (plugin load with `has_note_input`, `ensure_processing_started` failures, zero-output warnings).
+- **NoteOn construction**: `NoteOnEvent::new(offset, pckn, vel)` where `vel = note.velocity as f64 / 127.0` (normalized 0.0–1.0). `Pckn::new(port, channel, key, note_id)` — note_id always 0 (fine as long as overlapping same-key notes don't occur).
 - **Default note duration**: 1 beat (computed from BPM * sample rate)
 - **Sample rate aware**: `ClipHandle::new_midi()` takes `sample_rate` param; `draw_midi` takes `sample_rate` for correct beat-to-frame conversion
 - **No MIDI recording** or file import/export in Phase 1
 
 ### Undo Architecture (v0.3.0)
-- **UndoCommand enum** in `undo/mod.rs`: `MoveClip`, `TrimClip`, `DeleteClip`, `AddMidiNote`, `RemoveMidiNote`, `AddMidiClip`, `AddTrack`, `DeleteTrack`
+- **UndoCommand enum** in `undo/mod.rs`: `MoveClip`, `TrimClip`, `DeleteClip`, `AddMidiNote`, `RemoveMidiNote`, `AddMidiClip`, `AddTrack`, `DeleteTrack`, `AddEffect`, `RemoveEffect`, `RecordAudio`, `MoveAutomationPoint`
 - `apply_undo`/`apply_redo` take `&mut [TrackHandle]` (slice) — cannot add/remove elements
 - **Track undo/redo** handled at `HdawApp` level in `undo()`/`redo()` with full `Vec<TrackHandle>` access. `AddTrack`/`DeleteTrack` are no-op in `apply_undo`/`apply_redo`.
 - `DeleteTrack` undo restores track + track UI state + returns clips from pool
 - `AddTrack` undo removes the track from both models
 - `DeleteClip` undo creates `ClipHandle::new_midi()` for MIDI clips
+- `RemoveEffect.removed_lanes: Vec<AutomationLane>` — effect-param automation lanes preserved for undo/redo
 - `PoolClip::from_clip()` preserves original clip UUID for undo consistency
 
 ### Effect Parameter Pattern

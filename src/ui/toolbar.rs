@@ -1,4 +1,4 @@
-use egui::{Button, Context};
+use egui::{Button, Context, menu};
 
 pub struct ToolbarState;
 
@@ -13,6 +13,7 @@ pub struct ToolbarAction {
     pub pause_clicked: bool,
     pub stop_clicked: bool,
     pub import_clicked: bool,
+    pub midi_import_clicked: bool,
     pub fx_clicked: bool,
     pub new_clicked: bool,
     pub save_clicked: bool,
@@ -22,12 +23,49 @@ pub struct ToolbarAction {
     pub undo_clicked: bool,
     pub redo_clicked: bool,
     pub loop_clicked: bool,
+    pub record_clicked: bool,
     pub add_track_clicked: bool,
     pub delete_track_clicked: bool,
     pub add_instrument_clicked: bool,
+    pub add_group_clicked: bool,
+    pub add_return_clicked: bool,
     pub mixer_clicked: bool,
     pub pool_clicked: bool,
     pub preferences_clicked: bool,
+    pub metronome_clicked: bool,
+    pub export_clicked: bool,
+}
+
+impl Default for ToolbarAction {
+    fn default() -> Self {
+        Self {
+            play_clicked: false,
+            pause_clicked: false,
+            stop_clicked: false,
+            import_clicked: false,
+            midi_import_clicked: false,
+            fx_clicked: false,
+            new_clicked: false,
+            save_clicked: false,
+            save_as_clicked: false,
+            open_clicked: false,
+            snap_clicked: false,
+            undo_clicked: false,
+            redo_clicked: false,
+            loop_clicked: false,
+            record_clicked: false,
+            add_track_clicked: false,
+            delete_track_clicked: false,
+            add_instrument_clicked: false,
+            mixer_clicked: false,
+            add_group_clicked: false,
+            add_return_clicked: false,
+            pool_clicked: false,
+            preferences_clicked: false,
+            metronome_clicked: false,
+            export_clicked: false,
+        }
+    }
 }
 
 pub fn render(
@@ -41,38 +79,51 @@ pub fn render(
     can_undo: bool,
     can_redo: bool,
     loop_enabled: bool,
+    metronome_enabled: bool,
+    is_recording: bool,
     mixer_visible: bool,
     has_selected_track: bool,
     pool_visible: bool,
     has_instruments: bool,
 ) -> ToolbarAction {
-    let mut action = ToolbarAction {
-        play_clicked: false,
-        pause_clicked: false,
-        stop_clicked: false,
-        import_clicked: false,
-        fx_clicked: false,
-        new_clicked: false,
-        save_clicked: false,
-        save_as_clicked: false,
-        open_clicked: false,
-        snap_clicked: false,
-        undo_clicked: false,
-        redo_clicked: false,
-        loop_clicked: false,
-        add_track_clicked: false,
-        delete_track_clicked: false,
-        add_instrument_clicked: false,
-        mixer_clicked: false,
-        pool_clicked: false,
-        preferences_clicked: false,
-    };
+    let mut action = ToolbarAction::default();
 
-    egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-        ui.add_space(2.0);
-        ui.horizontal(|ui| {
-            ui.label("HDAW");
-            ui.separator();
+    // 1. Menu Bar
+    egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+        menu::bar(ui, |ui| {
+            ui.menu_button("File", |ui| {
+                if ui.button("New Project").clicked() {
+                    action.new_clicked = true;
+                    ui.close_menu();
+                }
+                if ui.button("Open...").clicked() {
+                    action.open_clicked = true;
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui.button("Save").clicked() {
+                    action.save_clicked = true;
+                    ui.close_menu();
+                }
+                if ui.button("Save As...").clicked() {
+                    action.save_as_clicked = true;
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui.button("Import WAV...").clicked() {
+                    action.import_clicked = true;
+                    ui.close_menu();
+                }
+                if ui.button("Import MIDI...").clicked() {
+                    action.midi_import_clicked = true;
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui.button("Export Audio...").clicked() {
+                    action.export_clicked = true;
+                    ui.close_menu();
+                }
+            });
 
             ui.menu_button("Edit", |ui| {
                 if ui.add_enabled(can_undo, egui::Button::new("Undo")).clicked() {
@@ -90,110 +141,176 @@ pub fn render(
                 }
             });
 
-            ui.menu_button("View", |ui| {
-                let mut mixer_vis = mixer_visible;
-                if ui.checkbox(&mut mixer_vis, "Mixer").clicked() {
-                    action.mixer_clicked = true;
-                    ui.close_menu();
-                }
-                let mut pool_state = pool_visible;
-                if ui.checkbox(&mut pool_state, "Audio Pool").clicked() {
-                    action.pool_clicked = true;
-                    ui.close_menu();
-                }
-            });
-
-            ui.menu_button("File", |ui| {
-                if ui.button("New Project").clicked() {
-                    action.new_clicked = true;
-                    ui.close_menu();
-                }
-                if ui.button("Open...").clicked() {
-                    action.open_clicked = true;
-                    ui.close_menu();
-                }
-                if ui.button("Save").clicked() {
-                    action.save_clicked = true;
-                    ui.close_menu();
-                }
-                if ui.button("Save As...").clicked() {
-                    action.save_as_clicked = true;
-                    ui.close_menu();
-                }
-                ui.separator();
-                if ui.button("Import Audio...").clicked() {
-                    action.import_clicked = true;
-                    ui.close_menu();
-                }
-            });
-
-            if ui
-                .add(Button::new(if is_playing { "\u{23F8}" } else { "\u{25B6}" }))
-                .clicked()
-            {
-                if is_playing {
-                    action.pause_clicked = true;
-                } else {
-                    action.play_clicked = true;
-                }
-            }
-            if ui.button("\u{25A0}").clicked() {
-                action.stop_clicked = true;
-            }
-
-            ui.separator();
-
-            let mins = (position_secs / 60.0) as u32;
-            let secs = (position_secs % 60.0) as u32;
-            let millis = ((position_secs % 1.0) * 1000.0) as u32;
-            ui.monospace(format!("{:02}:{:02}.{:03}", mins, secs, millis));
-
-            ui.separator();
-
-            ui.label(format!("BPM {:.1}", bpm));
-            ui.label(format!("{} / {}", time_sig_num, time_sig_den));
-
-            ui.separator();
-
-            let snap_label = if snap_enabled { "Snap" } else { "Snap" };
-            if ui
-                .add(egui::Button::new(snap_label).selected(snap_enabled))
-                .clicked()
-            {
-                action.snap_clicked = true;
-            }
-
-            ui.separator();
-
-            ui.menu_button("+", |ui| {
-                if ui.button("Track").clicked() {
+            ui.menu_button("Track", |ui| {
+                if ui.button("Add Blank Track").clicked() {
                     action.add_track_clicked = true;
                     ui.close_menu();
                 }
                 if has_instruments {
-                    if ui.button("Instrument...").clicked() {
+                    if ui.button("Add Instrument...").clicked() {
                         action.add_instrument_clicked = true;
                         ui.close_menu();
                     }
                 }
+                ui.separator();
+                if ui.button("Add Group Track").clicked() {
+                    action.add_group_clicked = true;
+                    ui.close_menu();
+                }
+                if ui.button("Add Return Track").clicked() {
+                    action.add_return_clicked = true;
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui.add_enabled(has_selected_track, egui::Button::new("Delete Selected Track")).clicked() {
+                    action.delete_track_clicked = true;
+                    ui.close_menu();
+                }
             });
-            if ui.add_enabled(has_selected_track, egui::Button::new("-").small()).clicked() {
-                action.delete_track_clicked = true;
+
+            ui.menu_button("Transport", |ui| {
+                if ui.button(if is_playing { "Pause" } else { "Play" }).clicked() {
+                    if is_playing { action.pause_clicked = true; } else { action.play_clicked = true; }
+                    ui.close_menu();
+                }
+                if ui.button("Stop").clicked() {
+                    action.stop_clicked = true;
+                    ui.close_menu();
+                }
+                ui.separator();
+                let mut le = loop_enabled;
+                if ui.checkbox(&mut le, "Loop Region").clicked() {
+                    action.loop_clicked = true;
+                    ui.close_menu();
+                }
+            });
+
+            ui.menu_button("View", |ui| {
+                let mut mixer_vis = mixer_visible;
+                if ui.checkbox(&mut mixer_vis, "Mixer Panel").clicked() {
+                    action.mixer_clicked = true;
+                    ui.close_menu();
+                }
+                let mut pool_vis = pool_visible;
+                if ui.checkbox(&mut pool_vis, "Audio Pool").clicked() {
+                    action.pool_clicked = true;
+                    ui.close_menu();
+                }
+            });
+        });
+    });
+
+    // 2. Tool Bar
+    egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            // Transport Group
+            if ui.add(Button::new(if is_playing { "\u{23F8}" } else { "\u{25B6}" })
+                .min_size(egui::vec2(30.0, 24.0)))
+                .clicked()
+            {
+                if is_playing { action.pause_clicked = true; } else { action.play_clicked = true; }
+            }
+            if ui.add(Button::new("\u{25A0}").min_size(egui::vec2(30.0, 24.0))).clicked() {
+                action.stop_clicked = true;
             }
 
-            ui.separator();
-
-            if ui
-                .add(egui::Button::new("\u{21BA}")  // loop arrow symbol
-                    .selected(loop_enabled))
+            let rec_label = if is_recording { "\u{25A0}" } else { "\u{25CF}" };
+            let rec_color = if is_recording {
+                let pulse = (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+                    / 500)
+                    % 2
+                    == 0;
+                if pulse {
+                    egui::Color32::from_rgb(0xff, 0x22, 0x22)
+                } else {
+                    egui::Color32::from_rgb(0x88, 0x11, 0x11)
+                }
+            } else {
+                egui::Color32::from_rgb(0xcc, 0x44, 0x44)
+            };
+            if ui.add(
+                egui::Button::new(
+                    egui::RichText::new(rec_label).color(rec_color).size(14.0)
+                )
+                .min_size(egui::vec2(30.0, 24.0))
+            )
+            .clicked()
+            {
+                action.record_clicked = true;
+            }
+            
+            if ui.add(egui::Button::new("\u{21BA}")  // loop arrow symbol
+                .selected(loop_enabled)
+                .min_size(egui::vec2(30.0, 24.0)))
                 .clicked()
             {
                 action.loop_clicked = true;
             }
 
-            if ui.button("FX").clicked() {
-                action.fx_clicked = true;
+            if ui.add(egui::Button::new("\u{2669}")  // metronome (quarter note)
+                .selected(metronome_enabled)
+                .min_size(egui::vec2(30.0, 24.0)))
+                .clicked()
+            {
+                action.metronome_clicked = true;
             }
+
+            ui.separator();
+
+            // Tools / Snap
+            let snap_label = "Snap";
+            if ui.add(egui::Button::new(snap_label).selected(snap_enabled)).clicked() {
+                action.snap_clicked = true;
+            }
+
+            ui.separator();
+
+            // Import Dropdown
+            ui.menu_button("Import", |ui| {
+                if ui.button("WAV...").clicked() {
+                    action.import_clicked = true;
+                    ui.close_menu();
+                }
+                if ui.button("MIDI...").clicked() {
+                    action.midi_import_clicked = true;
+                    ui.close_menu();
+                }
+            });
+
+            ui.separator();
+
+            // Time Display
+            let mins = (position_secs / 60.0) as u32;
+            let secs = (position_secs % 60.0) as u32;
+            let millis = ((position_secs % 1.0) * 1000.0) as u32;
+            ui.monospace(egui::RichText::new(format!("{:02}:{:02}.{:03}", mins, secs, millis))
+                .color(egui::Color32::from_rgb(0x8b, 0xc3, 0x4a))
+                .size(16.0));
+
+            ui.separator();
+
+            // Project Settings
+            ui.label(egui::RichText::new(format!("BPM {:.1}", bpm)).small());
+            ui.label(egui::RichText::new(format!("{} / {}", time_sig_num, time_sig_den)).small());
+
+            ui.separator();
+
+            // Panel Toggles (Right Aligned)
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add(egui::Button::new("FX").selected(false)).clicked() {
+                    action.fx_clicked = true;
+                }
+                if ui.add(egui::Button::new("Mixer").selected(mixer_visible)).clicked() {
+                    action.mixer_clicked = true;
+                }
+                if ui.add(egui::Button::new("Pool").selected(pool_visible)).clicked() {
+                    action.pool_clicked = true;
+                }
+            });
         });
         ui.add_space(2.0);
     });

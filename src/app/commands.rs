@@ -3,7 +3,10 @@ use crate::app::{HdawApp, TrackUiState};
 use crate::audio::effects::dsp_effect::{EffectInstance, EffectType};
 use crate::project::clip::{AudioClip, ClipKind};
 use crate::project::clip_handle::ClipHandle;
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use uuid::Uuid;
 
 impl HdawApp {
     pub fn update_clip_position(&mut self, track_index: usize, clip_id: uuid::Uuid, new_position: u64) {
@@ -89,6 +92,29 @@ impl HdawApp {
         self.timeline_state.selected_clip_id = None;
     }
 
+    pub fn update_clip_fade(&mut self, track_index: usize, clip_id: uuid::Uuid, fade_in: Option<u64>, fade_out: Option<u64>) {
+        if let Some(track) = self.project.tracks.get_mut(track_index) {
+            for clip in track.clips.iter_mut() {
+                match clip {
+                    ClipKind::Audio(a) if a.id == clip_id => {
+                        if let Some(fi) = fade_in { a.fade_in_frames = fi; }
+                        if let Some(fo) = fade_out { a.fade_out_frames = fo; }
+                    }
+                    _ => continue,
+                }
+                break;
+            }
+        }
+        if let Ok(tracks) = self.engine.tracks.lock() {
+            if let Some(track) = tracks.get(track_index) {
+                if let Some(ch) = track.clips.iter().find(|c| c.clip_id == clip_id) {
+                    if let Some(fi) = fade_in { ch.fade_in_frames.store(fi, Ordering::Release); }
+                    if let Some(fo) = fade_out { ch.fade_out_frames.store(fo, Ordering::Release); }
+                }
+            }
+        }
+    }
+
     pub fn toggle_track_mute(&mut self, track_index: usize) {
         if let Ok(tracks) = self.engine.tracks.lock() {
             if let Some(track) = tracks.get(track_index) {
@@ -103,6 +129,19 @@ impl HdawApp {
                     old_value: old,
                 });
             }
+        }
+    }
+
+    pub fn toggle_track_arm(&mut self, track_index: usize) {
+        if let Ok(tracks) = self.engine.tracks.lock() {
+            if let Some(track) = tracks.get(track_index) {
+                let old = track.armed.load(Ordering::Acquire);
+                track.armed.store(!old, Ordering::Release);
+            }
+        }
+        if let Some(tui) = self.track_ui.get(track_index) {
+            let old = tui.armed.load(Ordering::Acquire);
+            tui.armed.store(!old, Ordering::Release);
         }
     }
 
@@ -148,14 +187,21 @@ impl HdawApp {
         handle.add_effect(instance);
 
         let track_ui = TrackUiState {
+            id: handle.id,
             name: name.clone(),
             color: [0x2a, 0x1a, 0x2a],
             volume: handle.volume.clone(),
             pan: handle.pan.clone(),
             mute: handle.mute.clone(),
             solo: handle.solo.clone(),
+            armed: handle.armed.clone(),
             peak_left: handle.peak_left.clone(),
             peak_right: handle.peak_right.clone(),
+            parent_group: None,
+            is_group: false,
+            is_return: false,
+            collapsed: false,
+            send_levels: Vec::new(),
         };
 
         let mut track = crate::project::track::Track::new(name);
@@ -177,24 +223,89 @@ impl HdawApp {
         });
     }
 
+    pub fn assign_instrument(&mut self, track_index: usize, desc: &crate::audio::clap_scanner::PluginDescriptor) {
+        let sr = self.engine.transport.sample_rate();
+        let adapter = match crate::audio::clap_effect::ClapEffectAdapter::new_instance(&desc.id, &desc.path, sr) {
+            Ok(a) => a,
+            Err(e) => {
+                self.error_message = Some(format!("Failed to load instrument {}: {}", desc.name, e));
+                return;
+            }
+        };
+        let etype = EffectType::Clap {
+            plugin_id: desc.id.clone(),
+            path: desc.path.to_string_lossy().into_owned(),
+        };
+        let instance = EffectInstance::new_clap(desc.name.clone(), etype.clone(), adapter);
+
+        let effect_index;
+        let serialized;
+        if let Ok(mut ts) = self.engine.tracks.lock() {
+            if let Some(t) = ts.get_mut(track_index) {
+                effect_index = t.fx_chain.len();
+                t.add_effect(instance);
+                // Convert to serialized effect for project state
+                let inst = t.fx_chain.last().unwrap();
+                let pv: Vec<f32> = inst.parameter_info().iter()
+                    .map(|p| inst.parameter_value(p.id)).collect();
+                serialized = crate::project::track::SerializedEffect {
+                    name: inst.name.clone(),
+                    effect_type: inst.effect_type.clone(),
+                    bypass: inst.is_bypassed(),
+                    param_values: pv,
+                };
+            } else { return; }
+        } else { return; }
+
+        if let Some(track) = self.project.tracks.get_mut(track_index) {
+            let idx = effect_index.min(track.fx_chain.len());
+            track.fx_chain.insert(idx, serialized.clone());
+        }
+
+        self.undo_state.push(UndoCommand::AddEffect {
+            track_index,
+            effect_index,
+            serialized,
+        });
+    }
+
     pub fn add_blank_track(&mut self) {
         let track_count = self.project.tracks.len();
         let name = format!("Track {}", track_count + 1);
 
-        let handle = crate::project::track::TrackHandle::new();
-        let track_ui = TrackUiState {
+        let mut handle = crate::project::track::TrackHandle::new();
+        let mut track_ui = TrackUiState {
+            id: handle.id,
             name: name.clone(),
             color: [0x1a, 0x2a, 0x1a],
             volume: handle.volume.clone(),
             pan: handle.pan.clone(),
             mute: handle.mute.clone(),
             solo: handle.solo.clone(),
+            armed: handle.armed.clone(),
             peak_left: handle.peak_left.clone(),
             peak_right: handle.peak_right.clone(),
+            parent_group: None,
+            is_group: false,
+            is_return: false,
+            collapsed: false,
+            send_levels: Vec::new(),
         };
 
         let mut track = crate::project::track::Track::new(name);
         track.color = track_ui.color;
+
+        // Add send slots for existing return tracks
+        for rt in self.project.tracks.iter().filter(|t| t.is_return) {
+            let sid = rt.id;
+            handle.sends.push(crate::project::track::SendSlot::new(sid, 0.0, false));
+            track_ui.send_levels.push(Arc::new(std::sync::atomic::AtomicU32::new(f32::to_bits(0.0))));
+            track.sends.push(crate::project::track::SendSlotDef {
+                target_id: sid,
+                level: 0.0,
+                pre_fader: false,
+            });
+        }
 
         self.track_ui.push(track_ui.clone());
         self.engine.add_track(handle);
@@ -211,11 +322,187 @@ impl HdawApp {
         });
     }
 
+    pub fn add_group_track(&mut self) {
+        let track_count = self.project.tracks.len();
+        let name = format!("Group {}", track_count + 1);
+
+        let handle = crate::project::track::TrackHandle::new_group();
+        let track_ui = TrackUiState {
+            id: handle.id,
+            name: name.clone(),
+            color: [0x3a, 0x3a, 0x2a],
+            volume: handle.volume.clone(),
+            pan: handle.pan.clone(),
+            mute: handle.mute.clone(),
+            solo: handle.solo.clone(),
+            armed: handle.armed.clone(),
+            peak_left: handle.peak_left.clone(),
+            peak_right: handle.peak_right.clone(),
+            parent_group: None,
+            is_group: true,
+            is_return: false,
+            collapsed: false,
+            send_levels: Vec::new(),
+        };
+
+        let track = crate::project::track::Track::new_group(name);
+
+        self.track_ui.push(track_ui.clone());
+        self.engine.add_track(handle);
+        self.project.add_track(track.clone());
+
+        let new_index = self.track_ui.len() - 1;
+        self.selected_track = Some(new_index);
+
+        self.undo_state.push(UndoCommand::AddTrack {
+            track_index: new_index,
+            track,
+            track_ui,
+        });
+    }
+
+    pub fn add_return_track(&mut self) {
+        let track_count = self.project.tracks.len();
+        let name = format!("Return {}", track_count + 1);
+
+        let handle = crate::project::track::TrackHandle::new_return();
+        let track_ui = TrackUiState {
+            id: handle.id,
+            name: name.clone(),
+            color: [0x3a, 0x2a, 0x3a],
+            volume: handle.volume.clone(),
+            pan: handle.pan.clone(),
+            mute: handle.mute.clone(),
+            solo: handle.solo.clone(),
+            armed: handle.armed.clone(),
+            peak_left: handle.peak_left.clone(),
+            peak_right: handle.peak_right.clone(),
+            parent_group: None,
+            is_group: false,
+            is_return: true,
+            collapsed: false,
+            send_levels: Vec::new(),
+        };
+
+        let track = crate::project::track::Track::new_return(name);
+
+        // Add send slots on all existing tracks pointing to this return track
+        let return_id = handle.id;
+        if let Ok(mut tracks) = self.engine.tracks.lock() {
+            for t in tracks.iter_mut() {
+                t.sends.push(crate::project::track::SendSlot::new(return_id, 0.0, false));
+            }
+        }
+        for tui in self.track_ui.iter_mut() {
+            tui.send_levels.push(Arc::new(std::sync::atomic::AtomicU32::new(f32::to_bits(0.0))));
+        }
+        for t in self.project.tracks.iter_mut() {
+            t.sends.push(crate::project::track::SendSlotDef {
+                target_id: return_id,
+                level: 0.0,
+                pre_fader: false,
+            });
+        }
+
+        self.track_ui.push(track_ui.clone());
+        self.engine.add_track(handle);
+        self.project.add_track(track.clone());
+
+        let new_index = self.track_ui.len() - 1;
+        self.selected_track = Some(new_index);
+
+        self.undo_state.push(UndoCommand::AddTrack {
+            track_index: new_index,
+            track,
+            track_ui,
+        });
+    }
+
+    pub fn set_track_parent(&mut self, track_idx: usize, parent_id: Option<Uuid>) -> bool {
+        // Cycle detection: DFS from parent to see if we'd reach the track
+        if let Some(pid) = parent_id {
+            let track_id = if let Some(tui) = self.track_ui.get(track_idx) {
+                tui.id
+            } else {
+                return false;
+            };
+            // Follow parent_group links from pid
+            let mut visited = HashSet::new();
+            let mut cursor = pid;
+            loop {
+                if cursor == track_id {
+                    self.error_message = Some("Cannot route: would create a cycle".to_string());
+                    return false;
+                }
+                if !visited.insert(cursor) {
+                    break; // break cycles in existing data
+                }
+                // Find the track with this id and get its parent_group
+                let found = self.track_ui.iter().find(|t| t.id == cursor)
+                    .and_then(|t| t.parent_group);
+                match found {
+                    Some(next) => cursor = next,
+                    None => break,
+                }
+            }
+        }
+
+        // Update all three models
+        if let Some(tui) = self.track_ui.get_mut(track_idx) {
+            tui.parent_group = parent_id;
+        }
+        if let Some(track) = self.project.tracks.get_mut(track_idx) {
+            track.parent_group = parent_id;
+        }
+        if let Ok(mut tracks) = self.engine.tracks.lock() {
+            if let Some(handle) = tracks.get_mut(track_idx) {
+                handle.parent_group = parent_id;
+            }
+        }
+        true
+    }
+
+    pub fn set_send_level(&mut self, track_idx: usize, send_idx: usize, level: f32) {
+        if let Ok(mut tracks) = self.engine.tracks.lock() {
+            if let Some(handle) = tracks.get_mut(track_idx) {
+                if let Some(slot) = handle.sends.get(send_idx) {
+                    slot.level.store(level.to_bits(), Ordering::Release);
+                }
+            }
+        }
+        if let Some(tui) = self.track_ui.get_mut(track_idx) {
+            if let Some(al) = tui.send_levels.get(send_idx) {
+                al.store(level.to_bits(), Ordering::Release);
+            }
+        }
+        if let Some(track) = self.project.tracks.get_mut(track_idx) {
+            if let Some(slot) = track.sends.get_mut(send_idx) {
+                slot.level = level;
+            }
+        }
+    }
+
+    pub fn set_send_pre_fader(&mut self, track_idx: usize, send_idx: usize, pre_fader: bool) {
+        if let Ok(mut tracks) = self.engine.tracks.lock() {
+            if let Some(handle) = tracks.get_mut(track_idx) {
+                if let Some(slot) = handle.sends.get_mut(send_idx) {
+                    slot.pre_fader = pre_fader;
+                }
+            }
+        }
+        if let Some(track) = self.project.tracks.get_mut(track_idx) {
+            if let Some(slot) = track.sends.get_mut(send_idx) {
+                slot.pre_fader = pre_fader;
+            }
+        }
+    }
+
     pub fn add_midi_note(&mut self, track_index: usize, clip_id: uuid::Uuid, note: crate::project::midi_note::MidiNote) {
         if let Some(track) = self.project.tracks.get_mut(track_index) {
             if let Some(ClipKind::Midi(clip)) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Midi(m) if m.id == clip_id)) {
                 clip.notes.push(note.clone());
                 clip.notes.sort_by_key(|n| n.start_frame);
+                clip.thumb_dirty = true;
             }
         }
         if let Ok(mut tracks) = self.engine.tracks.lock() {
@@ -244,6 +531,7 @@ impl HdawApp {
             if let Some(ClipKind::Midi(clip)) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Midi(m) if m.id == clip_id)) {
                 if note_idx < clip.notes.len() {
                     clip.notes.remove(note_idx);
+                    clip.thumb_dirty = true;
                 }
             }
         }
@@ -275,6 +563,7 @@ impl HdawApp {
             length_frames,
             notes: Vec::new(),
             color: [0x8a, 0x2b, 0xe2],
+            thumb_dirty: true,
         };
         let clip = ClipKind::Midi(midi_clip);
 

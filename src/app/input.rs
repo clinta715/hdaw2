@@ -30,7 +30,9 @@ pub fn handle_keyboard_input(app: &mut HdawApp, ctx: &egui::Context) {
         if input.consume_key(egui::Modifiers::CTRL, Key::N) {
             app.new_project_requested = true;
         }
-        if input.consume_key(egui::Modifiers::CTRL, Key::I) {
+        if input.consume_key(egui::Modifiers::CTRL, Key::I) && input.modifiers.shift {
+            app.import_midi();
+        } else if input.consume_key(egui::Modifiers::CTRL, Key::I) {
             app.import_audio();
         }
         if input.consume_key(egui::Modifiers::NONE, Key::F2) {
@@ -87,12 +89,28 @@ pub fn handle_pending_requests(app: &mut HdawApp, ctx: &egui::Context) {
         app.pause_requested = false;
     }
     if app.stop_requested {
+        if app.recording {
+            app.finish_recording();
+        }
         app.stop();
         app.stop_requested = false;
+    }
+    if app.pause_requested && app.recording {
+        app.finish_recording();
     }
     if app.seek_requested {
         app.engine.transport.seek_to_frame(app.seek_frame);
         app.seek_requested = false;
+    }
+
+    if app.record_requested {
+        app.record_requested = false;
+        if app.recording {
+            app.finish_recording();
+            app.stop();
+        } else {
+            app.start_recording();
+        }
     }
 
     if app.new_project_requested {
@@ -125,6 +143,103 @@ pub fn handle_pending_requests(app: &mut HdawApp, ctx: &egui::Context) {
         let mut dialog = make_dialog_with_dir(app.preferences.last_open_dir.as_ref());
         dialog.pick_file();
         app.open_dialog = Some(dialog);
+    }
+
+    if app.export_requested {
+        app.export_requested = false;
+        let mut dialog = make_dialog_with_dir(app.preferences.last_save_dir.as_ref())
+            .title("Export Audio");
+        dialog.save_file();
+        app.export_dialog = Some(dialog);
+    }
+
+    if let Some(dialog) = &mut app.export_dialog {
+        dialog.update(ctx);
+        match dialog.state().clone() {
+            DialogState::Selected(path) => {
+                app.preferences.last_save_dir = path.parent().map(|p| p.to_path_buf());
+                prefs_io::save_preferences(&app.preferences);
+                app.export_save_path = Some(path);
+                app.export_dialog = None;
+            }
+            DialogState::Cancelled => {
+                app.export_dialog = None;
+            }
+            _ => {}
+        }
+    }
+
+    if app.exporting {
+        if let Some(path) = app.export_save_path.clone() {
+            use crate::audio::stream::render_export;
+            use hound::WavSpec;
+            let sr = app.engine.transport.sample_rate();
+            let end = if app.export_use_loop_range {
+                let (_, loop_out) = app.engine.transport.load_loop_region();
+                if loop_out > 0 { loop_out } else {
+                    app.project_length_frames()
+                }
+            } else {
+                app.project_length_frames()
+            };
+            let start = if app.export_use_loop_range {
+                let (loop_in, _) = app.engine.transport.load_loop_region();
+                loop_in
+            } else { 0 };
+
+            if let Ok(mut tracks_guard) = app.engine.tracks.lock() {
+                let samples = render_export(
+                    &mut *tracks_guard,
+                    &*app.engine.master_bus,
+                    sr,
+                    start,
+                    end,
+                );
+                app.export_progress = 1.0;
+                let spec = WavSpec {
+                    channels: 2,
+                    sample_rate: sr,
+                    bits_per_sample: app.export_bit_depth,
+                    sample_format: if app.export_bit_depth == 32 {
+                        hound::SampleFormat::Float
+                    } else {
+                        hound::SampleFormat::Int
+                    },
+                };
+                let result = hound::WavWriter::create(&path, spec);
+                match result {
+                    Ok(mut writer) => {
+                        if app.export_bit_depth == 32 {
+                            for frame in samples.chunks(2) {
+                                if let [l, r] = frame {
+                                    writer.write_sample(*l).ok();
+                                    writer.write_sample(*r).ok();
+                                }
+                            }
+                        } else {
+                            let scale = (1i32 << (app.export_bit_depth - 1)) as f32;
+                            for frame in samples.chunks(2) {
+                                if let [l, r] = frame {
+                                    writer.write_sample((l * scale) as i32).ok();
+                                    writer.write_sample((r * scale) as i32).ok();
+                                }
+                            }
+                        }
+                        writer.finalize().ok();
+                        app.export_done_message = Some(format!("Exported to {}", path.display()));
+                    }
+                    Err(e) => {
+                        app.error_message = Some(format!("Export failed: {}", e));
+                    }
+                }
+            } else {
+                app.error_message = Some("Failed to lock tracks for export".to_string());
+            }
+        }
+        app.exporting = false;
+        app.export_progress = 0.0;
+        app.export_save_path = None;
+        app.export_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     {

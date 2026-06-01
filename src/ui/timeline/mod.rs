@@ -43,20 +43,46 @@ pub enum LoopHandle {
 }
 
 impl TimelineState {
-    pub fn grid_step_secs(&self) -> f64 {
+    pub fn beat_step(&self, bpm: f64, division: crate::ui::preferences::GridDivision) -> f64 {
+        let fixed = division.to_beats();
+        if fixed > 0.0 {
+            return fixed;
+        }
+
         let pps = self.pixels_per_second;
-        if pps > 200.0 { 0.5 }
-        else if pps > 80.0 { 1.0 }
-        else if pps > 30.0 { 5.0 }
-        else { 10.0 }
+        let bps = bpm / 60.0;
+        let pixels_per_beat = pps / bps;
+        
+        if pixels_per_beat > 80.0 { 0.25 } // 1/16th notes (assuming 4/4)
+        else if pixels_per_beat > 40.0 { 0.5 } // 1/8th notes
+        else if pixels_per_beat > 20.0 { 1.0 } // 1/4 notes
+        else if pixels_per_beat > 5.0 { 4.0 }  // 1 bar (4/4)
+        else { 16.0 } // 4 bars
     }
 
-    pub fn snap_frames_to_grid(&self, frames: u64, sr: u32) -> u64 {
+    pub fn snap_frames_to_grid(&self, frames: u64, sr: u32, bpm: f64, prefs: &crate::ui::preferences::PreferencesState, markers: &[crate::project::marker::Marker]) -> u64 {
         if !self.snap_enabled { return frames; }
-        let step = self.grid_step_secs();
-        let t = frames as f64 / sr as f64;
-        let snapped = (t / step).round() * step;
-        (snapped * sr as f64).round().max(0.0) as u64
+        
+        let sr_f = sr as f64;
+        
+        // 1. Try snapping to markers first if enabled
+        if prefs.snap_to_markers {
+            let threshold_frames = (sr_f * 0.05) as u64; // 50ms snap range
+            for marker in markers {
+                let dist = (frames as i64 - marker.position_frames as i64).abs();
+                if dist < threshold_frames as i64 {
+                    return marker.position_frames;
+                }
+            }
+        }
+
+        // 2. Fallback to grid snapping
+        let step = self.beat_step(bpm, prefs.grid_division);
+        let bps = bpm / 60.0;
+        let frames_per_beat = sr_f / bps;
+        let frames_step = step * frames_per_beat;
+        
+        (frames as f64 / frames_step).round() as u64 * frames_step as u64
     }
 }
 
@@ -67,6 +93,8 @@ pub struct DragState {
     pub original_position_frames: u64,
     pub original_offset_frames: u64,
     pub original_length_frames: u64,
+    pub original_fade_in: u64,
+    pub original_fade_out: u64,
     pub mode: DragMode,
 }
 
@@ -80,6 +108,8 @@ pub enum DragMode {
     Move,
     TrimLeft,
     TrimRight,
+    FadeIn,
+    FadeOut,
 }
 
 impl Default for TimelineState {
@@ -120,6 +150,7 @@ pub fn render(ui: &mut Ui, app: &mut HdawApp) {
     painter.rect_filled(rect, 0.0, bg);
 
     let sr = app.engine.transport.sample_rate();
+    let bpm = app.project.bpm;
 
     let (loop_in, loop_out) = app.engine.transport.load_loop_region();
     ruler::draw(
@@ -131,8 +162,12 @@ pub fn render(ui: &mut Ui, app: &mut HdawApp) {
         Some(loop_out),
         app.engine.transport.loop_enabled.load(Ordering::Acquire),
         sr,
+        bpm,
+        &app.project.tempo_events,
+        &app.project.time_sig_events,
+        &app.preferences,
     );
-    draw_grid_lines(&painter, &rect, &app.timeline_state, header_width);
+    draw_grid_lines(&painter, &rect, &app.timeline_state, header_width, bpm, &app.preferences, &app.project.tempo_events, sr);
 
     render_tracks(&painter, &rect, sr, app, header_width, track_height);
 
@@ -185,9 +220,18 @@ fn handle_track_context_menu(ui: &Ui, app: &mut HdawApp) {
                 .cloned().collect();
             if !instruments.is_empty() {
                 ui.separator();
-                ui.label("Add Instrument Track");
+                ui.label("Assign Instrument");
                 for desc in &instruments {
                     if ui.button(&desc.name).clicked() {
+                        app.assign_instrument(track_idx, &desc);
+                        close = true;
+                    }
+                }
+                
+                ui.separator();
+                ui.label("Add New Instrument Track");
+                for desc in &instruments {
+                    if ui.button(format!("New {}", desc.name)).clicked() {
                         app.add_instrument_track(desc);
                         close = true;
                     }
@@ -240,32 +284,97 @@ fn clamp_scroll_y(rect: &Rect, app: &mut HdawApp, track_height: f32) {
         .max(-max_scroll);
 }
 
-fn draw_grid_lines(painter: &egui::Painter, rect: &Rect, state: &TimelineState, header_width: f32) {
+fn draw_grid_lines(painter: &egui::Painter, rect: &Rect, state: &TimelineState, header_width: f32, bpm: f64, prefs: &crate::ui::preferences::PreferencesState, tempo_events: &[crate::project::tempo_event::TempoEvent], sample_rate: u32) {
     if !state.snap_enabled { return; }
-    let step = state.grid_step_secs();
     let pps = state.pixels_per_second;
-    let start_time = (state.scroll_x / pps).max(0.0);
-    let end_time = (state.scroll_x + rect.width() as f64) / pps;
-    let first_tick = (start_time / step).ceil() * step;
-    let mut t = first_tick;
-    let grid_color = Color32::from_rgba_premultiplied(60, 60, 60, 30);
-    while t <= end_time {
-        let x = rect.left() + (t * pps - state.scroll_x) as f32;
+    let use_tempo_track = !tempo_events.is_empty();
+    let sr = sample_rate as f64;
+
+    let start_secs = state.scroll_x / pps;
+    let end_secs = (state.scroll_x + rect.width() as f64) / pps;
+    let start_frame = (start_secs * sr).max(0.0) as u64;
+    let end_frame = (end_secs * sr) as u64;
+
+    let start_beat = if use_tempo_track {
+        crate::project::tempo_event::frames_to_beats(start_frame, tempo_events, sample_rate)
+    } else {
+        start_secs * (bpm / 60.0)
+    };
+    let end_beat = if use_tempo_track {
+        crate::project::tempo_event::frames_to_beats(end_frame, tempo_events, sample_rate)
+    } else {
+        end_secs * (bpm / 60.0)
+    };
+
+    let effective_bpm = if use_tempo_track { crate::project::tempo_event::tempo_at(tempo_events, start_frame) } else { bpm };
+    let step = state.beat_step(effective_bpm, prefs.grid_division);
+
+    let first_tick = (start_beat / step).ceil() * step;
+    let base_alpha = (prefs.grid_opacity * 255.0) as u8;
+
+    let mut beat = first_tick;
+    while beat <= end_beat {
+        let x = if use_tempo_track {
+            let f = crate::project::tempo_event::beats_to_frames(beat, tempo_events, sample_rate);
+            let secs = f as f64 / sr;
+            rect.left() + (secs * pps - state.scroll_x) as f32
+        } else {
+            let secs = beat * 60.0 / bpm;
+            rect.left() + (secs * pps - state.scroll_x) as f32
+        };
+
         if x >= rect.left() + header_width && x <= rect.right() {
             let top_y = rect.top() + RULER_HEIGHT;
+            let alpha_mult = if (beat / 4.0).fract().abs() < 0.001 { 1.0 }
+                       else if (beat / 1.0).fract().abs() < 0.001 { 0.5 }
+                       else { 0.25 };
+            let alpha = (base_alpha as f32 * alpha_mult) as u8;
+            let grid_color = Color32::from_rgba_premultiplied(80, 80, 80, alpha);
             painter.line_segment(
                 [pos2(x, top_y), pos2(x, rect.bottom())],
                 egui::Stroke::new(1.0, grid_color),
             );
         }
-        t += step;
+        beat += step;
     }
 }
 
 fn render_tracks(painter: &egui::Painter, rect: &Rect, sr: u32, app: &mut HdawApp, header_width: f32, track_height: f32) {
-    for (i, track_ui) in app.track_ui.iter().enumerate() {
-        let track_y = rect.top() + RULER_HEIGHT + i as f32 * track_height
+    let track_count = app.track_ui.len();
+
+    // Precompute which tracks are hidden by collapsed group ancestors
+    let mut hidden_by_collapse = vec![false; track_count];
+    for (i, hidden) in hidden_by_collapse.iter_mut().enumerate() {
+        let mut cursor = i;
+        loop {
+            let pg = app.track_ui[cursor].parent_group;
+            match pg {
+                Some(pid) => {
+                    let parent_idx = app.track_ui.iter().position(|t| t.id == pid);
+                    match parent_idx {
+                        Some(pi) if pi < i || pi != cursor => {
+                            if app.track_ui[pi].collapsed {
+                                *hidden = true;
+                                break;
+                            }
+                            cursor = pi;
+                        }
+                        _ => break,
+                    }
+                }
+                None => break,
+            }
+        }
+    }
+
+    let mut visible_idx = 0usize;
+    for i in 0..track_count {
+        if hidden_by_collapse[i] { continue; }
+
+        let track_y = rect.top() + RULER_HEIGHT + visible_idx as f32 * track_height
             + app.timeline_state.scroll_y as f32;
+        visible_idx += 1;
+
         if track_y + track_height < rect.top() || track_y > rect.bottom() {
             continue;
         }
@@ -280,14 +389,24 @@ fn render_tracks(painter: &egui::Painter, rect: &Rect, sr: u32, app: &mut HdawAp
         );
 
         let is_selected = app.selected_track == Some(i);
+        let track_ui = &app.track_ui[i];
         track_headers::draw(painter, &header_rect, track_ui, is_selected);
 
-        let lane_bg = Color32::from_rgb(0x22, 0x22, 0x22);
-        painter.rect_filled(lane_rect, 0.0, lane_bg);
+        if app.track_ui[i].is_group || app.track_ui[i].is_return {
+            let lane_bg = if app.track_ui[i].is_group {
+                Color32::from_rgb(0x2a, 0x2a, 0x1a)
+            } else {
+                Color32::from_rgb(0x2a, 0x1a, 0x2a)
+            };
+            painter.rect_filled(lane_rect, 0.0, lane_bg);
+        } else {
+            let lane_bg = Color32::from_rgb(0x22, 0x22, 0x22);
+            painter.rect_filled(lane_rect, 0.0, lane_bg);
 
-        if let Some(track) = app.project.tracks.get(i) {
-            for clip in &track.clips {
-                clips::draw(painter, &lane_rect, clip, &app.timeline_state, sr);
+            let clip_count = app.project.tracks[i].clips.len();
+            for ci in 0..clip_count {
+                let clip = app.project.tracks[i].clips[ci].clone();
+                clips::draw(painter, &lane_rect, &clip, app, sr);
             }
         }
 

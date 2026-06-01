@@ -15,6 +15,46 @@ impl Default for BufferSizePref {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum GridDivision {
+    Adaptive,
+    Bar,
+    Half,
+    Quarter,
+    Eighth,
+    Sixteenth,
+}
+
+impl Default for GridDivision {
+    fn default() -> Self {
+        Self::Adaptive
+    }
+}
+
+impl GridDivision {
+    pub fn to_beats(self) -> f64 {
+        match self {
+            Self::Adaptive => 0.0,
+            Self::Bar => 4.0,
+            Self::Half => 2.0,
+            Self::Quarter => 1.0,
+            Self::Eighth => 0.5,
+            Self::Sixteenth => 0.25,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Adaptive => "Adaptive",
+            Self::Bar => "1 Bar",
+            Self::Half => "1/2 Note",
+            Self::Quarter => "1/4 Note",
+            Self::Eighth => "1/8 Note",
+            Self::Sixteenth => "1/16 Note",
+        }
+    }
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct PreferencesState {
     pub show_dialog: bool,
@@ -26,11 +66,22 @@ pub struct PreferencesState {
     pub default_time_sig_den: u8,
     pub default_zoom: f64,
     pub snap_default: bool,
+    pub snap_to_markers: bool,
+    pub grid_division: GridDivision,
+    pub grid_opacity: f32,
     pub track_height: f32,
     pub header_width: f32,
     pub show_mixer_on_start: bool,
     pub show_pool_on_start: bool,
+    pub show_effect_editor_on_start: bool,
     pub effect_panel_width: f32,
+    
+    // Piano Roll Prefs
+    pub piano_roll_row_height: f32,
+    pub piano_roll_min_note: u8,
+    pub piano_roll_max_note: u8,
+    pub piano_roll_default_velocity: u8,
+
     #[serde(default)]
     pub last_import_dir: Option<PathBuf>,
     #[serde(default)]
@@ -50,12 +101,22 @@ impl Default for PreferencesState {
             default_time_sig_num: 4,
             default_time_sig_den: 4,
             default_zoom: 100.0,
-            snap_default: false,
+            snap_default: true,
+            snap_to_markers: true,
+            grid_division: GridDivision::Adaptive,
+            grid_opacity: 0.5,
             track_height: 80.0,
             header_width: 220.0,
             show_mixer_on_start: true,
             show_pool_on_start: false,
+            show_effect_editor_on_start: true,
             effect_panel_width: 280.0,
+            
+            piano_roll_row_height: 14.0,
+            piano_roll_min_note: 24, // C1
+            piano_roll_max_note: 96, // C7
+            piano_roll_default_velocity: 100,
+
             last_import_dir: None,
             last_open_dir: None,
             last_save_dir: None,
@@ -161,10 +222,33 @@ pub fn render(ctx: &Context, app: &mut HdawApp) {
 
             ui.add_space(8.0);
 
-            CollapsingHeader::new("Timeline / UI")
-                .default_open(false)
+            CollapsingHeader::new("Timeline / Snap / Grid")
+                .default_open(true)
                 .show(ui, |ui| {
                     ui.add_space(4.0);
+                    ui.checkbox(&mut app.preferences.snap_default, "Enable Snapping by default");
+                    ui.checkbox(&mut app.preferences.snap_to_markers, "Snap to Markers");
+                    
+                    ui.horizontal(|ui| {
+                        ui.label("Grid Division:");
+                        ComboBox::from_id_salt("grid_division")
+                            .selected_text(app.preferences.grid_division.label())
+                            .show_ui(ui, |ui| {
+                                for div in &[GridDivision::Adaptive, GridDivision::Bar, GridDivision::Half, GridDivision::Quarter, GridDivision::Eighth, GridDivision::Sixteenth] {
+                                    if ui.selectable_label(app.preferences.grid_division == *div, div.label()).clicked() {
+                                        app.preferences.grid_division = *div;
+                                    }
+                                }
+                            });
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Grid Intensity:");
+                        ui.add(egui::Slider::new(&mut app.preferences.grid_opacity, 0.0..=1.0));
+                    });
+
+                    ui.separator();
+
                     ui.horizontal(|ui| {
                         ui.label("Default Zoom (px/sec):");
                         ui.add(egui::DragValue::new(&mut app.preferences.default_zoom)
@@ -183,16 +267,45 @@ pub fn render(ctx: &Context, app: &mut HdawApp) {
                             .speed(1.0)
                             .range(100.0..=400.0));
                     });
-                    ui.checkbox(&mut app.preferences.snap_default, "Snap to grid by default");
+                    
                     ui.add_space(4.0);
                     ui.checkbox(&mut app.preferences.show_mixer_on_start, "Show Mixer on startup");
                     ui.checkbox(&mut app.preferences.show_pool_on_start, "Show Audio Pool on startup");
+                    ui.checkbox(&mut app.preferences.show_effect_editor_on_start, "Show FX Editor on startup");
                     ui.horizontal(|ui| {
                         ui.label("Effect Panel Width:");
                         ui.add(egui::DragValue::new(&mut app.preferences.effect_panel_width)
                             .speed(5.0)
                             .range(150.0..=500.0));
                     });
+                });
+
+            ui.add_space(8.0);
+
+            CollapsingHeader::new("Piano Roll")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Row Height:");
+                        ui.add(egui::Slider::new(&mut app.preferences.piano_roll_row_height, 8.0..=32.0));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Default Velocity:");
+                        ui.add(egui::Slider::new(&mut app.preferences.piano_roll_default_velocity, 1..=127));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Note Range (MIDI):");
+                        ui.add(egui::DragValue::new(&mut app.preferences.piano_roll_min_note)
+                            .prefix("Min: ")
+                            .range(0..=127));
+                        ui.add(egui::DragValue::new(&mut app.preferences.piano_roll_max_note)
+                            .prefix("Max: ")
+                            .range(0..=127));
+                    });
+                    if app.preferences.piano_roll_min_note >= app.preferences.piano_roll_max_note {
+                        ui.colored_label(egui::Color32::from_rgb(0xff, 0x44, 0x44), "Min must be less than Max");
+                    }
                 });
 
             ui.add_space(12.0);

@@ -87,8 +87,9 @@ pub fn handle_automation_interaction(response: &Response, rect: &Rect, app: &mut
                     let pps = app.timeline_state.pixels_per_second;
                     let scroll_x = app.timeline_state.scroll_x;
                     let rel_x = pos.x - lane_rect.left();
+                    let bpm = app.project.bpm;
                     let time_frames = app.timeline_state.snap_frames_to_grid(
-                        ((rel_x as f64 + scroll_x) / pps * sr_f) as u64, sr);
+                        ((rel_x as f64 + scroll_x) / pps * sr_f) as u64, sr, bpm, &app.preferences, &app.project.markers);
                     if let Some(lane) = handle.automation_lanes.get_mut(li) {
                         if let Some(pt) = automation::add_point_to_lane(lane, time_frames, value) {
                             app.undo_state.push(crate::app::undo::UndoCommand::AutomationAddPoint {
