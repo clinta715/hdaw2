@@ -1,6 +1,7 @@
 use crate::audio::clap_host::{HdawClapHost, HdawClapHostShared, make_host_info};
 use crate::audio::clap_instance::ClapPluginState;
 use crate::audio::effects::parameter::{ParamId, ParameterInfo};
+use clack_extensions::gui::{GuiApiType, PluginGui};
 use clack_extensions::note_ports::PluginNotePorts;
 use clack_extensions::params::{ParamInfoBuffer, PluginParams};
 use clack_host::events::event_types::ParamValueEvent;
@@ -33,6 +34,8 @@ pub struct ClapEffectAdapter {
     input_ports: Option<Box<AudioPorts>>,
     output_ports: Option<Box<AudioPorts>>,
     pub has_note_input: bool,
+    pub gui_supported: bool,
+    params_initialized: bool,
     pending_params: Mutex<Vec<(u32, f64)>>,
 }
 
@@ -74,8 +77,8 @@ impl ClapEffectAdapter {
             for i in 0..count {
                 if let Some(info) = params.get_info(&mut handle, i, &mut buf) {
                     let name = String::from_utf8_lossy(info.name).into_owned();
-                    infos.push(ParameterInfo {
-                        id: infos.len() as ParamId + 1,
+                infos.push(ParameterInfo {
+                    id: i as ParamId,
                         name: name.clone(),
                         label: String::new(),
                         min_value: info.min_value as f32,
@@ -101,9 +104,25 @@ impl ClapEffectAdapter {
             false
         };
 
+        let gui_ext = {
+            let shared = instance.plugin_shared_handle();
+            shared.get_extension::<PluginGui>()
+        };
+
+        let gui_supported = if let Some(ref gui) = gui_ext {
+            let mut handle = instance.plugin_handle();
+            gui.is_api_supported(&mut handle, clack_extensions::gui::GuiConfiguration {
+                api_type: GuiApiType::WIN32,
+                is_floating: false,
+            })
+        } else {
+            false
+        };
+
         tracing::info!(
             %plugin_id,
             has_note_input,
+            gui_supported,
             num_params = param_infos.len(),
             "CLAP plugin loaded"
         );
@@ -118,7 +137,7 @@ impl ClapEffectAdapter {
         let config = PluginAudioConfiguration {
             sample_rate: sample_rate as f64,
             min_frames_count: 1,
-            max_frames_count: 2048,
+            max_frames_count: 8192,
         };
 
         let stopped = instance
@@ -135,6 +154,8 @@ impl ClapEffectAdapter {
             input_ports: Some(Box::new(AudioPorts::with_capacity(2, 1))),
             output_ports: Some(Box::new(AudioPorts::with_capacity(2, 1))),
             has_note_input,
+            gui_supported,
+            params_initialized: false,
             pending_params: Mutex::new(Vec::new()),
         })
     }
@@ -176,6 +197,58 @@ impl ClapEffectAdapter {
                 if let PluginAudioProcessor::Stopped(stopped) = processor {
                     instance.deactivate(stopped);
                 }
+            }
+        }
+    }
+
+    pub fn open_gui(&mut self, parent: *mut std::ffi::c_void) -> Result<(), String> {
+        let instance = self.instance.as_mut().ok_or("No instance")?;
+        let gui_ext = instance.plugin_shared_handle().get_extension::<PluginGui>().ok_or("No GUI extension")?;
+        let mut handle = instance.plugin_handle();
+
+        let configs = [
+            clack_extensions::gui::GuiConfiguration { api_type: GuiApiType::WIN32, is_floating: true },
+            clack_extensions::gui::GuiConfiguration { api_type: GuiApiType::WIN32, is_floating: false },
+        ];
+
+        let mut chosen = None;
+        for &cfg in &configs {
+            if gui_ext.is_api_supported(&mut handle, cfg) {
+                chosen = Some(cfg);
+                break;
+            }
+        }
+
+        let config = match chosen {
+            Some(c) => c,
+            None => {
+                configs[0]
+            }
+        };
+
+        gui_ext.create(&mut handle, config)
+            .map_err(|e| format!("Failed to create GUI: {:?}", e))?;
+
+        unsafe {
+            gui_ext.set_parent(&mut handle, clack_extensions::gui::Window::from_win32_hwnd(parent as _))
+                .map_err(|e| format!("Failed to set GUI parent: {:?}", e))?;
+        }
+
+        Ok(())
+    }
+
+    pub fn show_gui(&mut self) -> Result<(), String> {
+        let instance = self.instance.as_mut().ok_or("No instance")?;
+        let gui_ext = instance.plugin_shared_handle().get_extension::<PluginGui>().ok_or("No GUI extension")?;
+        let mut handle = instance.plugin_handle();
+        gui_ext.show(&mut handle).map_err(|e| format!("Failed to show GUI: {:?}", e))
+    }
+
+    pub fn close_gui(&mut self) {
+        if let Some(instance) = &mut self.instance {
+            if let Some(gui_ext) = instance.plugin_shared_handle().get_extension::<PluginGui>() {
+                let mut handle = instance.plugin_handle();
+                let _ = gui_ext.destroy(&mut handle);
             }
         }
     }
@@ -266,6 +339,24 @@ impl ClapEffectAdapter {
         COMBINED_EVENTS.with(|ceb| {
             let mut combined = ceb.borrow_mut();
             combined.clear();
+
+            // On first process, flush all default parameter values to the plugin.
+            // CLAP plugins don't auto-initialize params after activate(); we must
+            // explicitly send defaults so the plugin starts in a known state.
+            if !self.params_initialized {
+                self.params_initialized = true;
+                let pckn = Pckn::new(0u8, 0u8, 0u8, 0u8);
+                for info in self.state.parameter_info() {
+                    let ev = ParamValueEvent::new(
+                        0,
+                        ClapId::from(info.id),
+                        pckn,
+                        info.default_value as f64,
+                        Cookie::default(),
+                    );
+                    combined.push(&ev);
+                }
+            }
 
             // Copy all input events into combined buffer
             for event in input_events.iter() {

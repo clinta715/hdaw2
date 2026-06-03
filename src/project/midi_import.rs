@@ -67,7 +67,7 @@ fn extract_notes(
 ) -> Result<(Vec<MidiNote>, u64), String> {
     // Active notes: map from pitch -> (velocity, start_tick)
     use std::collections::HashMap;
-    let mut active_notes: HashMap<u8, (u8, u64)> = HashMap::new();
+            let mut active_notes: HashMap<u8, (u8, u64)> = HashMap::new();
     let mut notes: Vec<MidiNote> = Vec::new();
     let mut abs_tick: u64 = 0;
 
@@ -85,9 +85,10 @@ fn extract_notes(
                             if let Some((_start_vel, start_tick)) = active_notes.remove(&pitch) {
                                 let duration = abs_tick.saturating_sub(start_tick);
                                 if duration > 0 {
-                                    notes.push(MidiNote {
+                                notes.push(MidiNote {
                                         pitch,
                                         velocity: _start_vel,
+                                        release_velocity: 64,
                                         start_frame: (start_tick as f64 * frames_per_tick).round() as u64,
                                         duration: (duration as f64 * frames_per_tick).round() as u64,
                                     });
@@ -100,6 +101,7 @@ fn extract_notes(
                                     notes.push(MidiNote {
                                         pitch,
                                         velocity: old_vel,
+                                        release_velocity: 64,
                                         start_frame: (start_tick as f64 * frames_per_tick).round() as u64,
                                         duration: (duration as f64 * frames_per_tick).round() as u64,
                                     });
@@ -116,6 +118,7 @@ fn extract_notes(
                                 notes.push(MidiNote {
                                     pitch,
                                     velocity: start_vel,
+                                    release_velocity: vel.as_int(),
                                     start_frame: (start_tick as f64 * frames_per_tick).round() as u64,
                                     duration: (duration as f64 * frames_per_tick).round() as u64,
                                 });
@@ -124,6 +127,7 @@ fn extract_notes(
                             notes.push(MidiNote {
                                 pitch,
                                 velocity: vel.as_int(),
+                                release_velocity: vel.as_int(),
                                 start_frame: (abs_tick as f64 * frames_per_tick).round() as u64,
                                 duration: 1,
                             });
@@ -144,6 +148,7 @@ fn extract_notes(
         notes.push(MidiNote {
             pitch,
             velocity,
+            release_velocity: 64,
             start_frame: (start_tick as f64 * frames_per_tick).round() as u64,
             duration: (duration as f64 * frames_per_tick).ceil() as u64,
         });

@@ -25,9 +25,15 @@ pub struct TimelineState {
     pub auto_drag: Option<AutoDragState>,
     pub snap_enabled: bool,
     pub loop_drag: Option<LoopDragState>,
+    pub ruler_context_menu: Option<RulerContextMenu>,
     pub header_width: f32,
     pub track_height: f32,
     pub track_context_menu: Option<usize>,
+}
+
+pub struct RulerContextMenu {
+    pub frame: u64,
+    pub click_x: f32,
 }
 
 pub struct LoopDragState {
@@ -123,6 +129,7 @@ impl Default for TimelineState {
             auto_drag: None,
             snap_enabled: true,
             loop_drag: None,
+            ruler_context_menu: None,
             header_width: DEFAULT_HEADER_WIDTH,
             track_height: DEFAULT_TRACK_HEIGHT,
             track_context_menu: None,
@@ -156,6 +163,7 @@ pub fn render(ui: &mut Ui, app: &mut HdawApp) {
     ruler::draw(
         &painter,
         rect,
+        header_width,
         &app.timeline_state,
         &app.project.markers,
         Some(loop_in),
@@ -168,6 +176,45 @@ pub fn render(ui: &mut Ui, app: &mut HdawApp) {
         &app.preferences,
     );
     draw_grid_lines(&painter, &rect, &app.timeline_state, header_width, bpm, &app.preferences, &app.project.tempo_events, sr);
+
+    // Draw loop region overlay across the full timeline body (below ruler)
+    let loop_enabled = app.engine.transport.loop_enabled.load(Ordering::Acquire);
+    if loop_enabled && (loop_in > 0 || loop_out > 0) {
+        let pps = app.timeline_state.pixels_per_second;
+        let sr_f = sr as f64;
+        let in_secs = loop_in as f64 / sr_f;
+        let out_secs = loop_out as f64 / sr_f;
+        let in_x = rect.left() + header_width + (in_secs * pps - app.timeline_state.scroll_x) as f32;
+        let out_x = rect.left() + header_width + (out_secs * pps - app.timeline_state.scroll_x) as f32;
+        let l = in_x.max(rect.left() + header_width);
+        let r = out_x.min(rect.right());
+        if r > l {
+            let body_loop = Rect::from_min_max(
+                pos2(l, rect.top() + RULER_HEIGHT),
+                pos2(r, rect.bottom()),
+            );
+            painter.rect_filled(body_loop, 0.0, Color32::from_rgba_premultiplied(0x44, 0x88, 0xcc, 20));
+        }
+    }
+
+    // Right-click on ruler area -> show loop set context menu
+    if app.timeline_state.ruler_context_menu.is_none()
+        && response.clicked_by(egui::PointerButton::Secondary)
+    {
+        if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+            if pos.y <= rect.top() + RULER_HEIGHT && pos.x > rect.left() + header_width {
+                let timeline_x = (pos.x - rect.left() - header_width) as f64 + app.timeline_state.scroll_x;
+                let time = timeline_x / app.timeline_state.pixels_per_second;
+                if time >= 0.0 {
+                    let frame = app.timeline_state.snap_frames_to_grid((time * sr as f64) as u64, sr, bpm, &app.preferences, &app.project.markers);
+                    app.timeline_state.ruler_context_menu = Some(RulerContextMenu {
+                        frame,
+                        click_x: pos.x,
+                    });
+                }
+            }
+        }
+    }
 
     render_tracks(&painter, &rect, sr, app, header_width, track_height);
 
@@ -182,7 +229,21 @@ pub fn render(ui: &mut Ui, app: &mut HdawApp) {
     interaction::handle_track_header_interaction(&response, ui, &rect, app, header_width, track_height);
     auto_interaction::sync_automation_to_project(app);
     auto_interaction::handle_automation_interaction(&response, &rect, app, header_width, track_height);
+
+    // Double-click below all tracks to create a new track
+    if response.double_clicked_by(egui::PointerButton::Primary) {
+        if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+            if pos.x > rect.left() + header_width {
+                let track_y_index = ((pos.y - rect.top() - RULER_HEIGHT - app.timeline_state.scroll_y as f32) / track_height) as i32;
+                if track_y_index >= app.track_ui.len() as i32 {
+                    app.add_blank_track();
+                }
+            }
+        }
+    }
+
     handle_track_context_menu(ui, app);
+    handle_ruler_context_menu(ui, app);
 }
 
 fn handle_track_context_menu(ui: &Ui, app: &mut HdawApp) {
@@ -194,7 +255,7 @@ fn handle_track_context_menu(ui: &Ui, app: &mut HdawApp) {
     let name = &app.track_ui[track_idx].name;
     let mut close = false;
 
-    egui::Window::new(format!("Track: {name}"))
+    let wr = egui::Window::new(format!("Track: {name}"))
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, (0.0, 0.0))
@@ -227,7 +288,16 @@ fn handle_track_context_menu(ui: &Ui, app: &mut HdawApp) {
                         close = true;
                     }
                 }
-                
+
+                ui.separator();
+                ui.label("Replace Instrument");
+                for desc in &instruments {
+                    if ui.button(format!("Replace with {}", desc.name)).clicked() {
+                        app.replace_instrument(track_idx, desc);
+                        close = true;
+                    }
+                }
+
                 ui.separator();
                 ui.label("Add New Instrument Track");
                 for desc in &instruments {
@@ -239,13 +309,79 @@ fn handle_track_context_menu(ui: &Ui, app: &mut HdawApp) {
             }
 
             ui.separator();
+            if ui.add(egui::Button::new("Delete Track").fill(Color32::from_rgb(0x88, 0x22, 0x22))).clicked() {
+                app.delete_track(track_idx);
+                close = true;
+            }
+
+            ui.separator();
             if ui.button("Cancel").clicked() {
                 close = true;
             }
         });
 
+    if !close {
+        if let Some(inner) = wr {
+            if ui.input(|i| i.pointer.primary_clicked()) {
+                if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+                    if !inner.response.rect.contains(pos) {
+                        close = true;
+                    }
+                }
+            }
+        }
+    }
+
     if close {
         app.timeline_state.track_context_menu = None;
+    }
+}
+
+fn handle_ruler_context_menu(ui: &Ui, app: &mut HdawApp) {
+    let ctx_menu = match app.timeline_state.ruler_context_menu {
+        Some(ref cm) => cm.frame,
+        None => return,
+    };
+
+    let mut close = false;
+
+    let wr = egui::Window::new("Ruler")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::LEFT_TOP, (0.0, 0.0))
+        .show(ui.ctx(), |ui| {
+            if ui.button("Set Loop Start Here").clicked() {
+                let (_, loop_out) = app.engine.transport.load_loop_region();
+                app.engine.transport.set_loop_region(ctx_menu, loop_out.max(ctx_menu));
+                app.engine.transport.loop_enabled.store(true, Ordering::Release);
+                close = true;
+            }
+            if ui.button("Set Loop End Here").clicked() {
+                let (loop_in, _) = app.engine.transport.load_loop_region();
+                app.engine.transport.set_loop_region(loop_in.min(ctx_menu), ctx_menu);
+                app.engine.transport.loop_enabled.store(true, Ordering::Release);
+                close = true;
+            }
+            ui.separator();
+            if ui.button("Cancel").clicked() {
+                close = true;
+            }
+        });
+
+    if !close {
+        if let Some(inner) = wr {
+            if ui.input(|i| i.pointer.primary_clicked()) {
+                if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+                    if !inner.response.rect.contains(pos) {
+                        close = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if close {
+        app.timeline_state.ruler_context_menu = None;
     }
 }
 
@@ -342,6 +478,20 @@ fn draw_grid_lines(painter: &egui::Painter, rect: &Rect, state: &TimelineState, 
 fn render_tracks(painter: &egui::Painter, rect: &Rect, sr: u32, app: &mut HdawApp, header_width: f32, track_height: f32) {
     let track_count = app.track_ui.len();
 
+    let fx_infos: Vec<track_headers::TrackFxInfo> = if let Ok(tracks) = app.engine.tracks.lock() {
+        tracks.iter().map(|t| {
+            let inst_idx = t.fx_chain.iter().position(|e| e.has_note_input);
+            let instrument_name = inst_idx.map(|i| t.fx_chain[i].name.clone());
+            let fx_names: Vec<String> = t.fx_chain.iter()
+                .filter(|e| !e.has_note_input)
+                .map(|e| e.name.clone())
+                .collect();
+            track_headers::TrackFxInfo { instrument_name, fx_names }
+        }).collect()
+    } else {
+        vec![track_headers::TrackFxInfo::default(); track_count]
+    };
+
     // Precompute which tracks are hidden by collapsed group ancestors
     let mut hidden_by_collapse = vec![false; track_count];
     for (i, hidden) in hidden_by_collapse.iter_mut().enumerate() {
@@ -390,7 +540,7 @@ fn render_tracks(painter: &egui::Painter, rect: &Rect, sr: u32, app: &mut HdawAp
 
         let is_selected = app.selected_track == Some(i);
         let track_ui = &app.track_ui[i];
-        track_headers::draw(painter, &header_rect, track_ui, is_selected);
+        track_headers::draw(painter, &header_rect, track_ui, is_selected, &fx_infos[i]);
 
         if app.track_ui[i].is_group || app.track_ui[i].is_return {
             let lane_bg = if app.track_ui[i].is_group {
@@ -421,7 +571,7 @@ fn render_tracks(painter: &egui::Painter, rect: &Rect, sr: u32, app: &mut HdawAp
 }
 
 fn handle_playhead_follow(rect: &Rect, app: &mut HdawApp, header_width: f32) {
-    if !app.is_playing() { return; }
+    if !app.is_playing() || !app.preferences.follow_playhead { return; }
     let pps = app.timeline_state.pixels_per_second;
     let lane_width = (rect.width() - header_width) as f64;
     let pos_secs = app.position_seconds();

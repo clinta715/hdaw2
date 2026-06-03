@@ -22,7 +22,7 @@ pub fn handle_drag_end_snap(response: &Response, app: &mut HdawApp) {
                             let new_fi = clip.fade_in_frames;
                             let new_fo = clip.fade_out_frames;
                             if old_fi != new_fi || old_fo != new_fo {
-                                app.undo_state.push(crate::app::undo::UndoCommand::FadeClip {
+                                app.undo_service.push(crate::app::undo::UndoCommand::FadeClip {
                                     track_index: drag.track_index,
                                     clip_id: drag.clip_id,
                                     old_fade_in: old_fi,
@@ -67,7 +67,7 @@ pub fn handle_drag_end_snap(response: &Response, app: &mut HdawApp) {
                         match drag.mode {
                             DragMode::Move => {
                                 if old_pos != new_pos {
-                                    app.undo_state.push(crate::app::undo::UndoCommand::MoveClip {
+                                    app.undo_service.push(crate::app::undo::UndoCommand::MoveClip {
                                         track_index: drag.track_index,
                                         clip_id: drag.clip_id,
                                         old_position: old_pos,
@@ -77,7 +77,7 @@ pub fn handle_drag_end_snap(response: &Response, app: &mut HdawApp) {
                             }
                             _ => {
                                 if old_off != new_off || old_len != new_len {
-                                    app.undo_state.push(crate::app::undo::UndoCommand::TrimClip {
+                                    app.undo_service.push(crate::app::undo::UndoCommand::TrimClip {
                                         track_index: drag.track_index,
                                         clip_id: drag.clip_id,
                                         old_offset: old_off,

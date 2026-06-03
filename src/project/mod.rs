@@ -1,4 +1,5 @@
 pub mod automation;
+pub mod cc_event;
 pub mod clip;
 pub mod clip_handle;
 pub mod marker;

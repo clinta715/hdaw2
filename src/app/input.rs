@@ -64,6 +64,12 @@ pub fn handle_keyboard_input(app: &mut HdawApp, ctx: &egui::Context) {
         if input.consume_key(egui::Modifiers::NONE, Key::L) {
             app.toggle_loop();
         }
+        if input.consume_key(egui::Modifiers::NONE, Key::OpenBracket) {
+            app.set_loop_start_at_playhead();
+        }
+        if input.consume_key(egui::Modifiers::NONE, Key::CloseBracket) {
+            app.set_loop_end_at_playhead();
+        }
         if input.consume_key(egui::Modifiers::NONE, Key::M) {
             let count = app.project.markers.len() + 1;
             app.add_marker_at_playhead(format!("M{}", count));

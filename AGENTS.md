@@ -83,27 +83,33 @@ Two parallel data models must be manually kept in sync:
 - **Lane color**: Per-lane color for effect-param lanes derived from UUID hash into a 5-color palette (distinct from green=volume, blue=pan)
 - **All lanes overlaid**: Effect-param lanes render overlaid in timeline alongside Volume and Pan (not stacked)
 
-### MIDI Architecture (v0.3.0)
-- **Data model**: `MidiNote` (pitch, velocity, start_frame, duration) + `MidiClip` (id, name, position/length, notes, color)
+### MIDI Architecture (v0.5.0)
+- **Data model**: `MidiNote` (pitch, velocity, release_velocity, start_frame, duration) + `CCEvent` (cc_number, time_frames, value) + `MidiClip` (id, name, position/length, notes, cc_events, color)
 - **ClipKind enum**: `ClipKind::Audio(AudioClip) | ClipKind::Midi(MidiClip)` unifies both clip types on the project model
-- **Engine model**: `ClipHandle.midi_notes: Vec<MidiNote>` — separate from audio data, empty for audio clips
-- **Playback**: `process_track()` scans `ClipHandle.midi_notes` in each clip, builds sorted `EventBuffer` of NoteOn/NoteOff, sends to the first note-capable CLAP effect in the FX chain via `process_with_events()`
+- **Engine model**: `ClipHandle.midi_notes: Vec<MidiNote>` + `ClipHandle.midi_cc_events: Vec<CCEvent>` — separate from audio data, empty for audio clips
+- **Playback**: `process_track()` scans `ClipHandle.midi_notes` in each clip, builds sorted `EventBuffer` of NoteOn/NoteOff + `MidiEvent::new()` for CC (raw MIDI 1.0 `[0xB0, cc_number, val_7bit]`), sends to the first note-capable CLAP effect via `process_with_events()`
+- **CC dispatch**: CC events in the current buffer window are pushed to the event buffer as `MidiEvent` with offset calculated from timeline position. Value is mapped from 0.0–1.0 float to 0–127 7-bit.
 - **Seek handling**: On `seek_occurred`, sends NoteOff at offset 0 for all pre-existing notes; sends NoteOn for any note active in the buffer even if it started before the buffer
 - **Instrument detection**: `has_note_input` flag on `EffectInstance`; `ClapEffectAdapter` queries `PluginNotePorts` extension at load time
 - **Instrument slot**: first effect in FX chain with `has_note_input == true`; skipped in standard FX loop
-- **Piano roll**: `ui/piano_roll.rs` — grid editor with note add (left-click), delete (right-click), playhead indicator
-- **Sync**: `add_midi_note` / `remove_midi_note` / `add_midi_clip` in `commands.rs` update both project and engine models, push undo commands
+- **Piano roll**: `ui/piano_roll.rs` — grid editor with note add (left-click), delete (right-click), playhead indicator, note-length selector toolbar, and configurable controller lane at the bottom
+- **Controller lanes** (`ControllerLane` enum): `None` (hide), `Velocity` (green bars, note-by-note), `ReleaseVelocity` (orange bars), `Cc(n)` (blue automation curves). Selected via toolbar buttons. Default note length and lane mode persisted in `PianoRollState`.
+- **Velocity lane**: Bars aligned to note X-positions, height proportional to velocity/127. Click-drag to edit. Batch undo on drag stop.
+- **Release velocity**: Stored on `MidiNote`, captured from `NoteOff` velocity on MIDI import. Edit same as velocity lane.
+- **CC automation curves**: Events drawn as connected line segments with 3px draggable circles. Click on segment to insert, drag to move, right-click to delete. The toolbar shows 5 common CC presets (1=ModWheel, 7=Volume, 10=Pan, 11=Expression, 64=Sustain) + custom text input.
+- **CC data model**: `CCEvent { cc_number: u8, time_frames: u64, value: f32 }` in `project/cc_event.rs`. Serialized via serde. Synced engine↔project in `sync_engine_to_project`.
+- **CC undo**: `AddCcEvent`, `RemoveCcEvent`, `MoveCcEvent` variants with batch-on-stop drag semantics.
+- **Sync**: `add_midi_note` / `remove_midi_note` / `add_midi_clip` / `add_midi_cc_event` / `remove_midi_cc_event` in `commands.rs` update both project and engine models, push undo commands
 - **Event sorting**: MIDI events sorted by sample offset using `EventBuffer::sort()` which uses `sort_unstable_by_key` (no heap alloc). **Critical**: Unstable sort means NoteOn and NoteOff at the same offset can reorder. During seeks, NoteOff cleanup and NoteOn restart both land at offset 0 — NoteOn is deliberately bumped to offset 1 to prevent reordering.
 - **CLAP activation pattern**: `instance.activate(|_, _| (), config)` creates a no-op `AudioProcessor` handler (no audio-thread host callbacks). This is the **correct and documented pattern** from clack_host examples. Audio ports are registered independently at `process()` call time via `AudioPorts.with_input_buffers()` / `.with_output_buffers()`.
 - **`ensure_processing_started()`**: Called on first `process()`. If the plugin's C `start_processing()` returns false, this fails silently — the code now logs a `tracing::warn!`. This is a common failure point for misbehaving CLAP plugins.
 - **MIDI diagnostics**: Tracing at `tracing::debug!` level in `process_track()` (instrument detection, event count per buffer, output verification) and `clap_effect.rs` (plugin load with `has_note_input`, `ensure_processing_started` failures, zero-output warnings).
 - **NoteOn construction**: `NoteOnEvent::new(offset, pckn, vel)` where `vel = note.velocity as f64 / 127.0` (normalized 0.0–1.0). `Pckn::new(port, channel, key, note_id)` — note_id always 0 (fine as long as overlapping same-key notes don't occur).
-- **Default note duration**: 1 beat (computed from BPM * sample rate)
+- **Default note length**: Configurable in piano roll toolbar (1/1, 1/2, 1/4, 1/8, 1/16, 1/32), stored in `PianoRollState.note_length`. Used for single-click note creation (not click-drag).
 - **Sample rate aware**: `ClipHandle::new_midi()` takes `sample_rate` param; `draw_midi` takes `sample_rate` for correct beat-to-frame conversion
-- **No MIDI recording** or file import/export in Phase 1
 
-### Undo Architecture (v0.3.0)
-- **UndoCommand enum** in `undo/mod.rs`: `MoveClip`, `TrimClip`, `DeleteClip`, `AddMidiNote`, `RemoveMidiNote`, `AddMidiClip`, `AddTrack`, `DeleteTrack`, `AddEffect`, `RemoveEffect`, `RecordAudio`, `MoveAutomationPoint`
+### Undo Architecture (v0.5.0)
+- **UndoCommand enum** in `undo/mod.rs`: `MoveClip`, `TrimClip`, `DeleteClip`, `AddMidiNote`, `RemoveMidiNote`, `UpdateMidiNote`, `AddMidiClip`, `AddCcEvent`, `RemoveCcEvent`, `MoveCcEvent`, `AddTrack`, `DeleteTrack`, `AddEffect`, `RemoveEffect`, `RecordAudio`, `MoveAutomationPoint`
 - `apply_undo`/`apply_redo` take `&mut [TrackHandle]` (slice) — cannot add/remove elements
 - **Track undo/redo** handled at `HdawApp` level in `undo()`/`redo()` with full `Vec<TrackHandle>` access. `AddTrack`/`DeleteTrack` are no-op in `apply_undo`/`apply_redo`.
 - `DeleteTrack` undo restores track + track UI state + returns clips from pool
@@ -150,21 +156,21 @@ These are `thread_local! RefCell<Vec<f32>>` (or `EventBuffer`) that grow on firs
 | File | Lines | Purpose |
 |------|-------|---------|
 | `app/mod.rs` | 334 | HdawApp struct, constructor, accessors, `eframe::App::update`, undo/redo with track handling |
-| `app/commands.rs` | 399 | Clip/track manipulation ops, pool clip restore, MIDI note/clip add/remove, track delete with undo |
-| `app/project_io.rs` | 308 | Save/load/new/import, resample, sync_engine_to_project (incl. MIDI note sync) |
+| `app/commands.rs` | 399 | Clip/track manipulation ops, pool clip restore, MIDI note/clip/add/remove, CC event add/remove/move, track delete with undo |
+| `app/project_io.rs` | 308 | Save/load/new/import, resample, sync_engine_to_project (incl. MIDI note + CC event sync) |
 | `app/input.rs` | 158 | Keyboard handling, pending requests, file dialogs |
 | `app/prefs_io.rs` | 34 | Preferences load/save via RON |
-| `app/undo/mod.rs` | 135 | UndoCommand enum (incl. AddTrack/DeleteTrack/AddMidiNote/RemoveMidiNote/AddMidiClip), UndoStack |
-| `app/undo/commands.rs` | 343 | apply_undo/apply_redo implementations for all clip/MIDI variants |
+| `app/undo/mod.rs` | 135 | UndoCommand enum (incl. AddTrack/DeleteTrack/AddMidiNote/RemoveMidiNote/AddMidiClip/AddCcEvent/RemoveCcEvent/MoveCcEvent), UndoStack |
+| `app/undo/commands.rs` | 343 | apply_undo/apply_redo implementations for all clip/MIDI/CC variants |
 | `ui/timeline/mod.rs` | 305 | Timeline render, zoom/scroll, grid, track layout, context menu |
 | `ui/timeline/clips.rs` | 282 | Clip waveform/MIDI drawing + drag/trim/double-click interaction |
 | `ui/timeline/automation.rs` | 173 | Automation curve drawing + point editing helpers |
 | `ui/timeline/interaction.rs` | 206 | Seek, loop, clip, track header interaction handlers |
 | `ui/timeline/auto_interaction.rs` | 146 | Automation point interaction + dirty-flag sync to project |
 | `ui/timeline/ruler.rs` | 121 | Time ruler ticks, labels, loop markers |
-| `ui/timeline/track_headers.rs` | 139 | Track header drawing, mute/solo buttons, hit testing |
+| `ui/timeline/track_headers.rs` | 139 | Track header drawing, mute/solo buttons, hit testing, instrument/FX info display |
 | `ui/timeline/playhead.rs` | 14 | Playhead line drawing |
-| `ui/piano_roll.rs` | 220 | Piano roll grid editor with MIDI note add/delete/playhead |
+| `ui/piano_roll.rs` | 220 | Piano roll grid editor with note add/delete/playhead, note-length toolbar, velocity/release-velocity bars, CC curve editor |
 | `ui/effect_editor/mod.rs` | 337 | FX chain panel + effect parameter UI + engine_fx_to_serialized sync |
 | `ui/effect_editor/eq_graph.rs` | 82 | EQ frequency response graph |
 | `ui/preferences.rs` | 206 | Preferences dialog (3 sections: Audio, Project, Timeline/UI) |
@@ -175,22 +181,28 @@ These are `thread_local! RefCell<Vec<f32>>` (or `EventBuffer`) that grow on firs
 | `audio/engine.rs` | 134 | AudioEngine struct, init, play/pause/stop, rebuild, seek_occurred pass-through |
 | `audio/stream.rs` | 150 | build_stream, mix_tracks with seek_occurred, name_audio_thread, scratch buffers |
 | `audio/process.rs` | 119 | Per-track audio processing with seek-aware MIDI dispatch |
+| `audio/midi_dispatch.rs` | 155 | MIDI note + CC event dispatch to CLAP instruments |
 | `audio/transport.rs` | 80 | Transport: play/pause/stop, packed loop region, position, seek_occurred |
 | `audio/clap_scanner.rs` | 100 | CLAP plugin discovery in OS-standard directories |
 | `audio/clap_host.rs` | 47 | HDAW CLAP host handlers (logging, lifecycle) |
 | `audio/clap_instance.rs` | 75 | ClapPluginState: plugin metadata, parameter bridge |
-| `audio/clap_effect.rs` | 180 | ClapEffectAdapter: Drop impl, try_lock, COMBINED_EVENTS, process_inner, note-port detection |
+| `audio/clap_effect.rs` | 180 | ClapEffectAdapter: Drop impl, try_lock, COMBINED_EVENTS, process_inner, note-port detection, open_gui/close_gui/show_gui |
 | `audio/mixer.rs` | 43 | Master bus volume + peak metering |
 | `audio/effects/` | ~540 | 5 effects (Gain, EQ, Delay, Reverb, Compressor) + traits + factory |
 | `dsp/biquad.rs` | 89 | Shared biquad filter math |
 | `project/track.rs` | 97 | `TrackHandle` (engine) + `Track` (project) with `clips: Vec<ClipKind>` |
 | `project/automation.rs` | 64 | `AutomationLane` (with dirty flag) + `AutomationPoint` |
+| `project/cc_event.rs` | 12 | `CCEvent` struct (cc_number, time_frames, value) |
 | `project/clip.rs` | 88 | `ClipKind` enum + `AudioClip` with waveform peaks |
-| `project/clip_handle.rs` | 69 | `ClipHandle` (engine-side) with `midi_notes`, sample-rate-aware `new_midi()` |
-| `project/midi_clip.rs` | 13 | `MidiClip` struct (position, length, notes, color) |
-| `project/midi_note.rs` | 9 | `MidiNote` struct (pitch, velocity, start_frame, duration) |
+| `project/clip_handle.rs` | 69 | `ClipHandle` (engine-side) with `midi_notes` + `midi_cc_events`, sample-rate-aware `new_midi()` |
+| `project/midi_clip.rs` | 13 | `MidiClip` struct (position, length, notes, cc_events, color) |
+| `project/midi_note.rs` | 9 | `MidiNote` struct (pitch, velocity, release_velocity, start_frame, duration) |
 | `project/marker.rs` | 19 | `Marker` definition |
 | `project/pool.rs` | 28 | `AudioPoolEntry` definition (supports ClipKind, preserves UUID) |
+| | | |
+| | _New files added in v0.5.0_ | |
+| `project/cc_event.rs` | 12 | `CCEvent` struct for MIDI controller automation |
+| `ui/piano_roll_state.rs` | 34 | PianoRollState with controller lane config, CcDragState |
 
 ## Common Patterns to Follow
 
@@ -257,3 +269,4 @@ When adding new timeline rendering or interaction code:
 - serde 1.0 — Serialization derive macros
 - tracing 0.1 — Structured logging
 - clack_host 0.1 — CLAP plugin hosting
+- raw-window-handle 0.6 — Native window handle access

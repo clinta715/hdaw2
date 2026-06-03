@@ -2,6 +2,7 @@ mod commands;
 
 use crate::app::TrackUiState;
 use crate::project::automation::{AutomationLane, AutomationPoint};
+use crate::project::cc_event::CCEvent;
 use crate::project::clip::ClipKind;
 use crate::project::midi_note::MidiNote;
 use crate::project::track::{SerializedEffect, Track};
@@ -77,6 +78,31 @@ pub enum UndoCommand {
         clip_id: uuid::Uuid,
         note: MidiNote,
         note_index: usize,
+    },
+    UpdateMidiNote {
+        track_index: usize,
+        clip_id: uuid::Uuid,
+        note_index: usize,
+        old_note: MidiNote,
+        new_note: MidiNote,
+    },
+    AddCcEvent {
+        track_index: usize,
+        clip_id: uuid::Uuid,
+        event: CCEvent,
+    },
+    RemoveCcEvent {
+        track_index: usize,
+        clip_id: uuid::Uuid,
+        event: CCEvent,
+        event_index: usize,
+    },
+    MoveCcEvent {
+        track_index: usize,
+        clip_id: uuid::Uuid,
+        event_index: usize,
+        old_event: CCEvent,
+        new_event: CCEvent,
     },
     FadeClip {
         track_index: usize,

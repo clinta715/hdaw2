@@ -80,7 +80,7 @@ impl HdawApp {
                             }
                         }
                     }
-                    self.undo_state.push(UndoCommand::DeleteClip {
+                    self.undo_service.push(UndoCommand::DeleteClip {
                         track_index: ti,
                         clip_index: ci,
                         clip,
@@ -124,7 +124,7 @@ impl HdawApp {
                 if let Some(pt) = self.project.tracks.get_mut(track_index) {
                     pt.mute = new;
                 }
-                self.undo_state.push(UndoCommand::ToggleMute {
+                self.undo_service.push(UndoCommand::ToggleMute {
                     track_index,
                     old_value: old,
                 });
@@ -154,7 +154,7 @@ impl HdawApp {
                 if let Some(pt) = self.project.tracks.get_mut(track_index) {
                     pt.solo = new;
                 }
-                self.undo_state.push(UndoCommand::ToggleSolo {
+                self.undo_service.push(UndoCommand::ToggleSolo {
                     track_index,
                     old_value: old,
                 });
@@ -216,7 +216,7 @@ impl HdawApp {
         self.effect_editor_state.selected_track = Some(new_index);
         self.effect_editor_state.show_editor = true;
 
-        self.undo_state.push(UndoCommand::AddTrack {
+        self.undo_service.push(UndoCommand::AddTrack {
             track_index: new_index,
             track,
             track_ui,
@@ -262,7 +262,102 @@ impl HdawApp {
             track.fx_chain.insert(idx, serialized.clone());
         }
 
-        self.undo_state.push(UndoCommand::AddEffect {
+        self.undo_service.push(UndoCommand::AddEffect {
+            track_index,
+            effect_index,
+            serialized,
+        });
+    }
+
+    pub fn replace_instrument(&mut self, track_index: usize, desc: &crate::audio::clap_scanner::PluginDescriptor) {
+        let old_inst_idx: Option<usize>;
+        let old_serialized: Option<crate::project::track::SerializedEffect>;
+        let old_undo: Option<UndoCommand>;
+
+        if let Ok(mut ts) = self.engine.tracks.lock() {
+            if let Some(t) = ts.get_mut(track_index) {
+                old_inst_idx = t.fx_chain.iter().position(|e| e.has_note_input);
+                if let Some(idx) = old_inst_idx {
+                    let inst = &t.fx_chain[idx];
+                    let pv: Vec<f32> = inst.parameter_info().iter()
+                        .map(|p| inst.parameter_value(p.id)).collect();
+                    old_serialized = Some(crate::project::track::SerializedEffect {
+                        name: inst.name.clone(),
+                        effect_type: inst.effect_type.clone(),
+                        bypass: inst.is_bypassed(),
+                        param_values: pv,
+                    });
+                    old_undo = Some(UndoCommand::RemoveEffect {
+                        track_index,
+                        effect_index: idx,
+                        serialized: old_serialized.clone().unwrap(),
+                        removed_lanes: Vec::new(),
+                    });
+                    t.fx_chain.remove(idx);
+                } else {
+                    old_serialized = None;
+                    old_undo = None;
+                }
+            } else {
+                return;
+            }
+        } else {
+            return;
+        }
+
+        if let (Some(idx), Some(_)) = (old_inst_idx, &old_serialized) {
+            if let Some(track) = self.project.tracks.get_mut(track_index) {
+                if idx < track.fx_chain.len() {
+                    track.fx_chain.remove(idx);
+                }
+            }
+            self.undo_service.push(old_undo.unwrap());
+        }
+
+        // Assign new instrument (uses assign_instrument logic but without pushing a separate undo;
+        // we push a single compound undo below)
+        let sr = self.engine.transport.sample_rate();
+        let adapter = match crate::audio::clap_effect::ClapEffectAdapter::new_instance(&desc.id, &desc.path, sr) {
+            Ok(a) => a,
+            Err(e) => {
+                self.error_message = Some(format!("Failed to load instrument {}: {}", desc.name, e));
+                return;
+            }
+        };
+        let etype = EffectType::Clap {
+            plugin_id: desc.id.clone(),
+            path: desc.path.to_string_lossy().into_owned(),
+        };
+        let instance = EffectInstance::new_clap(desc.name.clone(), etype.clone(), adapter);
+
+        let effect_index;
+        let serialized;
+        if let Ok(mut ts) = self.engine.tracks.lock() {
+            if let Some(t) = ts.get_mut(track_index) {
+                effect_index = t.fx_chain.len();
+                t.add_effect(instance);
+                let inst = t.fx_chain.last().unwrap();
+                let pv: Vec<f32> = inst.parameter_info().iter()
+                    .map(|p| inst.parameter_value(p.id)).collect();
+                serialized = crate::project::track::SerializedEffect {
+                    name: inst.name.clone(),
+                    effect_type: inst.effect_type.clone(),
+                    bypass: inst.is_bypassed(),
+                    param_values: pv,
+                };
+            } else {
+                return;
+            }
+        } else {
+            return;
+        }
+
+        if let Some(track) = self.project.tracks.get_mut(track_index) {
+            let idx = effect_index.min(track.fx_chain.len());
+            track.fx_chain.insert(idx, serialized.clone());
+        }
+
+        self.undo_service.push(UndoCommand::AddEffect {
             track_index,
             effect_index,
             serialized,
@@ -315,7 +410,7 @@ impl HdawApp {
         self.selected_track = Some(new_index);
         self.effect_editor_state.selected_track = Some(new_index);
 
-        self.undo_state.push(UndoCommand::AddTrack {
+        self.undo_service.push(UndoCommand::AddTrack {
             track_index: new_index,
             track,
             track_ui,
@@ -354,7 +449,7 @@ impl HdawApp {
         let new_index = self.track_ui.len() - 1;
         self.selected_track = Some(new_index);
 
-        self.undo_state.push(UndoCommand::AddTrack {
+        self.undo_service.push(UndoCommand::AddTrack {
             track_index: new_index,
             track,
             track_ui,
@@ -411,7 +506,7 @@ impl HdawApp {
         let new_index = self.track_ui.len() - 1;
         self.selected_track = Some(new_index);
 
-        self.undo_state.push(UndoCommand::AddTrack {
+        self.undo_service.push(UndoCommand::AddTrack {
             track_index: new_index,
             track,
             track_ui,
@@ -513,7 +608,7 @@ impl HdawApp {
                 }
             }
         }
-        self.undo_state.push(UndoCommand::AddMidiNote {
+        self.undo_service.push(UndoCommand::AddMidiNote {
             track_index,
             clip_id,
             note,
@@ -545,12 +640,105 @@ impl HdawApp {
             }
         }
         if let Some(note) = note {
-            self.undo_state.push(UndoCommand::RemoveMidiNote {
+            self.undo_service.push(UndoCommand::RemoveMidiNote {
                 track_index,
                 clip_id,
                 note,
                 note_index: note_idx,
             });
+        }
+    }
+
+    pub fn update_midi_note(&mut self, track_index: usize, clip_id: uuid::Uuid, note_idx: usize, new_note: crate::project::midi_note::MidiNote) {
+        let old_note = self.project.tracks.get(track_index).and_then(|track| {
+            track.clips.iter().find_map(|c| match c {
+                ClipKind::Midi(m) if m.id == clip_id => m.notes.get(note_idx).cloned(),
+                _ => None,
+            })
+        });
+
+        if let Some(track) = self.project.tracks.get_mut(track_index) {
+            if let Some(ClipKind::Midi(clip)) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Midi(m) if m.id == clip_id)) {
+                if note_idx < clip.notes.len() {
+                    clip.notes[note_idx] = new_note.clone();
+                    clip.notes.sort_by_key(|n| n.start_frame);
+                    clip.thumb_dirty = true;
+                }
+            }
+        }
+        if let Ok(mut tracks) = self.engine.tracks.lock() {
+            if let Some(handle) = tracks.get_mut(track_index) {
+                if let Some(ch) = handle.clips.iter_mut().find(|c| c.clip_id == clip_id) {
+                    if note_idx < ch.midi_notes.len() {
+                        ch.midi_notes[note_idx] = new_note.clone();
+                        ch.midi_notes.sort_by_key(|n| n.start_frame);
+                    }
+                }
+            }
+        }
+        
+        if let Some(old) = old_note {
+             self.undo_service.push(UndoCommand::UpdateMidiNote {
+                track_index,
+                clip_id,
+                note_index: note_idx,
+                old_note: old,
+                new_note,
+            });
+        }
+    }
+
+    pub fn add_midi_cc_event(&mut self, track_index: usize, clip_id: uuid::Uuid, event: crate::project::cc_event::CCEvent) {
+        if let Some(track) = self.project.tracks.get_mut(track_index) {
+            if let Some(crate::project::clip::ClipKind::Midi(clip)) = track.clips.iter_mut().find(|c| matches!(c, crate::project::clip::ClipKind::Midi(m) if m.id == clip_id)) {
+                clip.cc_events.push(event.clone());
+                clip.cc_events.sort_by_key(|e| e.time_frames);
+            }
+        }
+        if let Ok(mut tracks) = self.engine.tracks.lock() {
+            if let Some(handle) = tracks.get_mut(track_index) {
+                if let Some(ch) = handle.clips.iter_mut().find(|c| c.clip_id == clip_id) {
+                    ch.midi_cc_events.push(event.clone());
+                    ch.midi_cc_events.sort_by_key(|e| e.time_frames);
+                }
+            }
+        }
+        self.undo_service.push(UndoCommand::AddCcEvent { track_index, clip_id, event });
+    }
+
+    pub fn remove_midi_cc_event(&mut self, track_index: usize, clip_id: uuid::Uuid, event: &crate::project::cc_event::CCEvent, event_index: usize) {
+        let event_clone = event.clone();
+        if let Some(track) = self.project.tracks.get_mut(track_index) {
+            if let Some(crate::project::clip::ClipKind::Midi(clip)) = track.clips.iter_mut().find(|c| matches!(c, crate::project::clip::ClipKind::Midi(m) if m.id == clip_id)) {
+                clip.cc_events.retain(|e| e.cc_number != event.cc_number || e.time_frames != event.time_frames);
+            }
+        }
+        if let Ok(mut tracks) = self.engine.tracks.lock() {
+            if let Some(handle) = tracks.get_mut(track_index) {
+                if let Some(ch) = handle.clips.iter_mut().find(|c| c.clip_id == clip_id) {
+                    ch.midi_cc_events.retain(|e| e.cc_number != event.cc_number || e.time_frames != event.time_frames);
+                }
+            }
+        }
+        self.undo_service.push(UndoCommand::RemoveCcEvent { track_index, clip_id, event: event_clone, event_index });
+    }
+
+    pub fn update_midi_cc_event(&mut self, track_index: usize, clip_id: uuid::Uuid, old_event: &crate::project::cc_event::CCEvent, new_event: crate::project::cc_event::CCEvent) {
+        if let Some(track) = self.project.tracks.get_mut(track_index) {
+            if let Some(crate::project::clip::ClipKind::Midi(clip)) = track.clips.iter_mut().find(|c| matches!(c, crate::project::clip::ClipKind::Midi(m) if m.id == clip_id)) {
+                if let Some(ctx) = clip.cc_events.iter_mut().find(|e| e.cc_number == old_event.cc_number && e.time_frames == old_event.time_frames) {
+                    *ctx = new_event.clone();
+                }
+            }
+        }
+        if let Ok(mut tracks) = self.engine.tracks.lock() {
+            if let Some(handle) = tracks.get_mut(track_index) {
+                if let Some(ch) = handle.clips.iter_mut().find(|c| c.clip_id == clip_id) {
+                    if let Some(ctx) = ch.midi_cc_events.iter_mut().find(|e| e.cc_number == old_event.cc_number && e.time_frames == old_event.time_frames) {
+                        *ctx = new_event.clone();
+                    }
+                }
+            }
         }
     }
 
@@ -563,6 +751,7 @@ impl HdawApp {
             length_frames,
             notes: Vec::new(),
             color: [0x8a, 0x2b, 0xe2],
+            cc_events: Vec::new(),
             thumb_dirty: true,
         };
         let clip = ClipKind::Midi(midi_clip);
@@ -584,7 +773,7 @@ impl HdawApp {
             tui.color = [0x2a, 0x1a, 0x3a];
         }
 
-        self.undo_state.push(UndoCommand::AddMidiClip {
+        self.undo_service.push(UndoCommand::AddMidiClip {
             track_index,
             clip,
         });
@@ -645,7 +834,7 @@ impl HdawApp {
         }
 
         if let (Some(track), Some(track_ui)) = (track, track_ui) {
-            self.undo_state.push(UndoCommand::DeleteTrack {
+            self.undo_service.push(UndoCommand::DeleteTrack {
                 track_index,
                 track,
                 track_ui,

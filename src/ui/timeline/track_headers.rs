@@ -1,11 +1,18 @@
 use egui::{pos2, vec2, Color32, Pos2, Rect, Stroke};
 use std::sync::atomic::Ordering;
 
+#[derive(Clone, Default)]
+pub struct TrackFxInfo {
+    pub instrument_name: Option<String>,
+    pub fx_names: Vec<String>,
+}
+
 pub fn draw(
     painter: &egui::Painter,
     rect: &Rect,
     track: &crate::app::TrackUiState,
     is_selected: bool,
+    fx_info: &TrackFxInfo,
 ) {
     let bg = if is_selected {
         Color32::from_rgb(0x2a, 0x35, 0x45)
@@ -116,6 +123,35 @@ pub fn draw(
         painter.text(arm_btn.center(), egui::Align2::CENTER_CENTER, "R", small_font.clone(), Color32::from_gray(220));
     }
 
+    let info_y = rect.top() + 68.0;
+    let info_font = egui::FontId::proportional(8.5);
+    let info_max_x = rect.right() - 22.0;
+
+    if let Some(ref inst) = fx_info.instrument_name {
+        let inst_text = format!("\u{266b} {}", inst);
+        let truncated = truncate_text(&inst_text, &info_font, text_x, info_max_x);
+        painter.text(
+            pos2(text_x, info_y),
+            egui::Align2::LEFT_TOP,
+            truncated,
+            info_font.clone(),
+            Color32::from_rgb(0x4d, 0xd0, 0xe1),
+        );
+    }
+
+    if !fx_info.fx_names.is_empty() {
+        let fx_y = if fx_info.instrument_name.is_some() { info_y + 10.0 } else { info_y };
+        let fx_text = fx_info.fx_names.join(", ");
+        let truncated = truncate_text(&fx_text, &info_font, text_x, info_max_x);
+        painter.text(
+            pos2(text_x, fx_y),
+            egui::Align2::LEFT_TOP,
+            truncated,
+            info_font.clone(),
+            Color32::from_gray(160),
+        );
+    }
+
     // Meters (Vertical on the right)
     let meter_x = rect.right() - 18.0;
     let meter_y = rect.top() + 4.0;
@@ -186,4 +222,32 @@ pub enum HeaderAction {
     ToggleCollapse,
     Volume,
     Pan,
+}
+
+fn truncate_text(text: &str, _font: &egui::FontId, min_x: f32, max_x: f32) -> String {
+    let max_width = max_x - min_x;
+    if max_width <= 0.0 { return String::new(); }
+
+    let mut result = String::new();
+    let mut current_width = 0.0;
+    let char_width = 5.5;
+
+    for ch in text.chars() {
+        let w = match ch {
+            '\u{266b}' => 7.0,
+            'A'..='Z' | '0'..='9' => 6.0,
+            _ => char_width,
+        };
+        if current_width + w > max_width {
+            break;
+        }
+        result.push(ch);
+        current_width += w;
+    }
+
+    if result.len() < text.len() {
+        result.push('\u{2026}');
+    }
+
+    result
 }

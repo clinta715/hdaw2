@@ -1,3 +1,4 @@
+use crate::project::cc_event::CCEvent;
 use crate::project::midi_note::MidiNote;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -15,6 +16,7 @@ pub struct ClipHandle {
     pub channels: u16,
     pub sample_rate: u32,
     pub midi_notes: Vec<MidiNote>,
+    pub midi_cc_events: Vec<CCEvent>,
 }
 
 impl ClipHandle {
@@ -32,6 +34,7 @@ impl ClipHandle {
             channels,
             sample_rate,
             midi_notes: Vec::new(),
+            midi_cc_events: Vec::new(),
         }
     }
 
@@ -48,6 +51,7 @@ impl ClipHandle {
             channels: 0,
             sample_rate,
             midi_notes: notes,
+            midi_cc_events: Vec::new(),
         }
     }
 

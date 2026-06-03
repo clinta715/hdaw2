@@ -2,6 +2,7 @@ use crate::audio::clap_effect::ClapEffectAdapter;
 use crate::audio::effects::create_effect;
 use crate::audio::effects::dsp_effect::{EffectInstance, EffectType};
 use crate::project::automation::AutomationPoint;
+use crate::project::cc_event::CCEvent;
 use crate::project::clip::ClipKind;
 use crate::project::clip_handle::ClipHandle;
 use crate::project::track::TrackHandle;
@@ -101,8 +102,85 @@ fn recreate_effect(serialized: &crate::project::track::SerializedEffect, sample_
     }
 }
 
+fn update_note(tracks: &mut [TrackHandle], project: &mut Project, track_index: usize, clip_id: uuid::Uuid, note_index: usize, note: &crate::project::midi_note::MidiNote) {
+    if let Some(track) = project.tracks.get_mut(track_index) {
+        if let Some(ClipKind::Midi(clip)) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Midi(m) if m.id == clip_id)) {
+            if note_index < clip.notes.len() {
+                clip.notes[note_index] = note.clone();
+                clip.notes.sort_by_key(|n| n.start_frame);
+                clip.thumb_dirty = true;
+            }
+        }
+    }
+    if let Some(handle) = tracks.get_mut(track_index) {
+        if let Some(ch) = handle.clips.iter_mut().find(|c| c.clip_id == clip_id) {
+            if note_index < ch.midi_notes.len() {
+                ch.midi_notes[note_index] = note.clone();
+                ch.midi_notes.sort_by_key(|n| n.start_frame);
+            }
+        }
+    }
+}
+
+fn add_cc_event(tracks: &mut [TrackHandle], project: &mut Project, track_index: usize, clip_id: uuid::Uuid, event: &CCEvent) {
+    if let Some(track) = project.tracks.get_mut(track_index) {
+        if let Some(ClipKind::Midi(clip)) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Midi(m) if m.id == clip_id)) {
+            clip.cc_events.push(event.clone());
+            clip.cc_events.sort_by_key(|e| e.time_frames);
+        }
+    }
+    if let Some(handle) = tracks.get_mut(track_index) {
+        if let Some(ch) = handle.clips.iter_mut().find(|c| c.clip_id == clip_id) {
+            ch.midi_cc_events.push(event.clone());
+            ch.midi_cc_events.sort_by_key(|e| e.time_frames);
+        }
+    }
+}
+
+fn remove_cc_event(tracks: &mut [TrackHandle], project: &mut Project, track_index: usize, clip_id: uuid::Uuid, event: &CCEvent) {
+    if let Some(track) = project.tracks.get_mut(track_index) {
+        if let Some(ClipKind::Midi(clip)) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Midi(m) if m.id == clip_id)) {
+            clip.cc_events.retain(|e| e.cc_number != event.cc_number || e.time_frames != event.time_frames);
+        }
+    }
+    if let Some(handle) = tracks.get_mut(track_index) {
+        if let Some(ch) = handle.clips.iter_mut().find(|c| c.clip_id == clip_id) {
+            ch.midi_cc_events.retain(|e| e.cc_number != event.cc_number || e.time_frames != event.time_frames);
+        }
+    }
+}
+
+fn replace_cc_event(tracks: &mut [TrackHandle], project: &mut Project, track_index: usize, clip_id: uuid::Uuid, _event_index: usize, event: &CCEvent) {
+    if let Some(track) = project.tracks.get_mut(track_index) {
+        if let Some(ClipKind::Midi(clip)) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Midi(m) if m.id == clip_id)) {
+            if let Some(ctx) = clip.cc_events.iter_mut().find(|e| e.cc_number == event.cc_number && e.time_frames == event.time_frames) {
+                *ctx = event.clone();
+            }
+        }
+    }
+    if let Some(handle) = tracks.get_mut(track_index) {
+        if let Some(ch) = handle.clips.iter_mut().find(|c| c.clip_id == clip_id) {
+            if let Some(ctx) = ch.midi_cc_events.iter_mut().find(|e| e.cc_number == event.cc_number && e.time_frames == event.time_frames) {
+                *ctx = event.clone();
+            }
+        }
+    }
+}
+
 pub fn apply_undo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoCommand, sample_rate: u32) {
     match *cmd {
+        UndoCommand::UpdateMidiNote { track_index, clip_id, note_index, ref old_note, .. } => {
+            update_note(tracks, project, track_index, clip_id, note_index, old_note);
+        }
+        UndoCommand::AddCcEvent { track_index, clip_id, ref event } => {
+            remove_cc_event(tracks, project, track_index, clip_id, event);
+        }
+        UndoCommand::RemoveCcEvent { track_index, clip_id, ref event, .. } => {
+            add_cc_event(tracks, project, track_index, clip_id, event);
+        }
+        UndoCommand::MoveCcEvent { track_index, clip_id, event_index, ref old_event, .. } => {
+            replace_cc_event(tracks, project, track_index, clip_id, event_index, old_event);
+        }
         UndoCommand::MoveClip { track_index, clip_id, old_position, .. } => {
             if let Some(track) = project.tracks.get_mut(track_index) {
                 for clip in track.clips.iter_mut() {
@@ -297,6 +375,18 @@ pub fn apply_undo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoC
 
 pub fn apply_redo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoCommand, sample_rate: u32) {
     match *cmd {
+        UndoCommand::UpdateMidiNote { track_index, clip_id, note_index, ref new_note, .. } => {
+            update_note(tracks, project, track_index, clip_id, note_index, new_note);
+        }
+        UndoCommand::AddCcEvent { track_index, clip_id, ref event } => {
+            add_cc_event(tracks, project, track_index, clip_id, event);
+        }
+        UndoCommand::RemoveCcEvent { track_index, clip_id, ref event, .. } => {
+            remove_cc_event(tracks, project, track_index, clip_id, event);
+        }
+        UndoCommand::MoveCcEvent { track_index, clip_id, event_index, ref new_event, .. } => {
+            replace_cc_event(tracks, project, track_index, clip_id, event_index, new_event);
+        }
         UndoCommand::MoveClip { track_index, clip_id, new_position, .. } => {
             if let Some(track) = project.tracks.get_mut(track_index) {
                 for clip in track.clips.iter_mut() {
@@ -352,24 +442,35 @@ pub fn apply_redo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoC
                 if let Some(pos) = handle.find_clip_by_id(clip_id) { handle.clips.remove(pos); }
             }
         }
-        UndoCommand::AddEffect { .. } => {}
-        UndoCommand::RemoveEffect { track_index, effect_index, ref serialized, ref removed_lanes } => {
+        UndoCommand::AddEffect { track_index, effect_index, ref serialized } => {
             if let Some(handle) = tracks.get_mut(track_index) {
                 let idx = effect_index.min(handle.fx_chain.len());
                 handle.fx_chain.insert(idx, recreate_effect(serialized, sample_rate));
-                for lane in removed_lanes {
-                    if !handle.automation_lanes.iter().any(|l| l.effect_instance_id == lane.effect_instance_id && l.param_id == lane.param_id) {
-                        handle.automation_lanes.push(lane.clone());
-                    }
-                }
             }
             if let Some(track) = project.tracks.get_mut(track_index) {
                 let idx = effect_index.min(track.fx_chain.len());
                 track.fx_chain.insert(idx, serialized.clone());
+            }
+        }
+        UndoCommand::RemoveEffect { track_index, effect_index, ref removed_lanes, .. } => {
+            if let Some(handle) = tracks.get_mut(track_index) {
+                if effect_index < handle.fx_chain.len() {
+                    handle.fx_chain.remove(effect_index);
+                }
                 for lane in removed_lanes {
-                    if !track.automation_lanes.iter().any(|l| l.effect_instance_id == lane.effect_instance_id && l.param_id == lane.param_id) {
-                        track.automation_lanes.push(lane.clone());
-                    }
+                    handle.automation_lanes.retain(|l|
+                        !(l.effect_instance_id == lane.effect_instance_id && l.param_id == lane.param_id)
+                    );
+                }
+            }
+            if let Some(track) = project.tracks.get_mut(track_index) {
+                if effect_index < track.fx_chain.len() {
+                    track.fx_chain.remove(effect_index);
+                }
+                for lane in removed_lanes {
+                    track.automation_lanes.retain(|l|
+                        !(l.effect_instance_id == lane.effect_instance_id && l.param_id == lane.param_id)
+                    );
                 }
             }
         }

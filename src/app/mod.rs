@@ -1,11 +1,15 @@
 pub mod commands;
+pub mod coordinator;
 pub mod input;
 pub mod prefs_io;
 pub mod project_io;
+pub mod project_service;
 pub mod undo;
+pub mod undo_service;
 
 use crate::audio::buffer::AudioBuffer;
 use crate::audio::clap_scanner::PluginDescriptor;
+use crate::audio::effects::dsp_effect::EffectKind;
 use crate::audio::engine::AudioEngine;
 use crate::project::clip::{AudioClip, ClipKind};
 use crate::project::clip_handle::ClipHandle;
@@ -14,14 +18,24 @@ use crate::project::Project;
 use crate::ui::audio_pool::AudioPoolPanelState;
 use crate::ui::effect_editor::EffectEditorState;
 use crate::ui::mixer_panel::MixerPanelState;
+use crate::ui::panels::PanelManager;
+use crate::ui::piano_roll_state::PianoRollState;
 use crate::ui::preferences::PreferencesState;
 use crate::ui::timeline::TimelineState;
 use crate::ui::toolbar::ToolbarState;
+use crate::app::undo_service::UndoService;
+use crate::app::coordinator::AppCoordinator;
 use egui_file_dialog::FileDialog;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use uuid::Uuid;
+
+#[derive(Clone, Default)]
+pub struct PluginGuiState {
+    pub is_open: bool,
+    pub initialized: bool,
+}
 
 #[derive(Clone)]
 pub struct TrackUiState {
@@ -43,6 +57,7 @@ pub struct TrackUiState {
 }
 
 pub struct HdawApp {
+    pub coordinator: AppCoordinator,
     pub project: Project,
     pub engine: AudioEngine,
     pub track_ui: Vec<TrackUiState>,
@@ -86,20 +101,25 @@ pub struct HdawApp {
     pub error_message: Option<String>,
     pub show_instrument_dialog: bool,
     pub show_piano_roll: bool,
+    pub piano_roll_state: PianoRollState,
     pub editing_midi_clip_id: Option<Uuid>,
-    pub undo_state: undo::UndoStack,
+    pub undo_service: UndoService,
     pub preferences: PreferencesState,
+    pub panel_manager: PanelManager,
     pub plugin_registry: Vec<PluginDescriptor>,
     pub waveform_cache: std::collections::HashMap<Uuid, egui::TextureHandle>,
     pub midi_thumb_cache: std::collections::HashMap<Uuid, egui::TextureHandle>,
+    pub active_plugin_guis: std::collections::HashMap<(usize, usize), PluginGuiState>, 
 }
 
 impl HdawApp {
     pub fn new() -> Self {
+        let coordinator = AppCoordinator::new();
         let mut engine = AudioEngine::new();
         engine.init();
 
         let mut app = Self {
+            coordinator,
             project: Project::new(),
             engine,
             track_ui: Vec::new(),
@@ -143,22 +163,24 @@ impl HdawApp {
             error_message: None,
             show_instrument_dialog: false,
             show_piano_roll: false,
+            piano_roll_state: PianoRollState::default(),
             editing_midi_clip_id: None,
-            undo_state: undo::UndoStack::new(),
+            undo_service: UndoService::new(),
             preferences: prefs_io::load_preferences().unwrap_or_default(),
+            panel_manager: PanelManager::new(),
             plugin_registry: Vec::new(),
             waveform_cache: std::collections::HashMap::new(),
             midi_thumb_cache: std::collections::HashMap::new(),
+            active_plugin_guis: std::collections::HashMap::new(),
         };
-        app.project.bpm = app.preferences.default_bpm;
-        app.project.time_signature_num = app.preferences.default_time_sig_num;
-        app.project.time_signature_den = app.preferences.default_time_sig_den;
-        app.timeline_state.pixels_per_second = app.preferences.default_zoom;
-        app.timeline_state.snap_enabled = app.preferences.snap_default;
-        app.timeline_state.header_width = app.preferences.header_width;
-        app.timeline_state.track_height = app.preferences.track_height;
-        app.mixer_state.visible = app.preferences.show_mixer_on_start;
-        app.audio_pool_state.visible = app.preferences.show_pool_on_start;
+        
+        let initial_prefs = app.preferences.clone();
+        app.apply_preferences(&initial_prefs);
+        app.project.bpm = initial_prefs.default_bpm;
+        app.project.time_signature_num = initial_prefs.default_time_sig_num;
+        app.project.time_signature_den = initial_prefs.default_time_sig_den;
+        app.timeline_state.snap_enabled = initial_prefs.snap_default;
+
         app.scan_plugins();
         app.add_blank_track();
         app
@@ -207,163 +229,19 @@ impl HdawApp {
     }
 
     pub fn undo(&mut self) {
-        let sr = self.engine.transport.sample_rate();
-        if let Ok(mut tracks) = self.engine.tracks.lock() {
-            if let Some(cmd) = self.undo_state.undo() {
-                match cmd {
-                    undo::UndoCommand::AddTrack { track_index, .. } => {
-                        if *track_index < tracks.len() {
-                            // Deactivate CLAP effects before removing
-                            for fx in &mut tracks[*track_index].fx_chain {
-                                if let crate::audio::effects::dsp_effect::EffectKind::Clap(adapter) = &fx.kind {
-                                    if let Ok(mut a) = adapter.lock() {
-                                        a.deactivate();
-                                    }
-                                }
-                            }
-                            tracks.remove(*track_index);
-                        }
-                        if *track_index < self.project.tracks.len() {
-                            self.project.tracks.remove(*track_index);
-                        }
-                        if *track_index < self.track_ui.len() {
-                            self.track_ui.remove(*track_index);
-                        }
-                        self.selected_track = None;
-                        self.effect_editor_state.selected_track = None;
-                    }
-                    undo::UndoCommand::RecordAudio { track_indices, clip_ids } => {
-                        for (ti, cid) in track_indices.iter().zip(clip_ids.iter()) {
-                            if let Some(track) = tracks.get_mut(*ti) {
-                                track.clips.retain(|c| c.clip_id != *cid);
-                            }
-                            if let Some(pt) = self.project.tracks.get_mut(*ti) {
-                                pt.clips.pop();
-                            }
-                            self.project.audio_pool.pop();
-                        }
-                    }
-                    undo::UndoCommand::ImportAudio { tracks: snapshots }
-                    | undo::UndoCommand::ImportMidi { tracks: snapshots } => {
-                        // Undo: remove tracks from both models, going backwards
-                        let count = snapshots.len();
-                        for _ in 0..count {
-                            let ti = self.project.tracks.len().saturating_sub(1);
-                            if ti < tracks.len() {
-                                for fx in &mut tracks[ti].fx_chain {
-                                    if let crate::audio::effects::dsp_effect::EffectKind::Clap(adapter) = &fx.kind {
-                                        if let Ok(mut a) = adapter.lock() {
-                                            a.deactivate();
-                                        }
-                                    }
-                                }
-                                tracks.remove(ti);
-                            }
-                            if ti < self.project.tracks.len() {
-                                self.project.tracks.remove(ti);
-                            }
-                            if ti < self.track_ui.len() {
-                                self.track_ui.remove(ti);
-                            }
-                        }
-                        self.selected_track = None;
-                        self.effect_editor_state.selected_track = None;
-                    }
-                    _ => undo::apply_undo(&mut self.project, &mut tracks, cmd, sr),
-                }
-            }
-        }
+        self.coordinator.undo(
+            &mut self.track_ui,
+            &mut self.selected_track,
+            &mut self.effect_editor_state,
+        );
     }
 
     pub fn redo(&mut self) {
-        let sr = self.engine.transport.sample_rate();
-        if let Ok(mut tracks) = self.engine.tracks.lock() {
-            if let Some(cmd) = self.undo_state.redo() {
-                match cmd {
-                    undo::UndoCommand::AddTrack { track_index, track, track_ui } => {
-                        let handle = crate::project::track::TrackHandle::new();
-                        handle.volume.store(f32::to_bits(track.volume), std::sync::atomic::Ordering::Release);
-                        handle.pan.store(f32::to_bits(track.pan), std::sync::atomic::Ordering::Release);
-                        handle.mute.store(track.mute, std::sync::atomic::Ordering::Release);
-                        handle.solo.store(track.solo, std::sync::atomic::Ordering::Release);
-                        let idx = (*track_index).min(tracks.len());
-                        tracks.insert(idx, handle);
-                        self.project.tracks.insert(idx, track.clone());
-                        self.track_ui.insert(idx, track_ui.clone());
-                    }
-                    undo::UndoCommand::DeleteTrack { track_index, .. } => {
-                        if *track_index < tracks.len() {
-                            for fx in &mut tracks[*track_index].fx_chain {
-                                if let crate::audio::effects::dsp_effect::EffectKind::Clap(adapter) = &fx.kind {
-                                    if let Ok(mut a) = adapter.lock() {
-                                        a.deactivate();
-                                    }
-                                }
-                            }
-                            tracks.remove(*track_index);
-                        }
-                        if *track_index < self.project.tracks.len() {
-                            let track = self.project.tracks.remove(*track_index);
-                            for clip in &track.clips {
-                                let pool_clip = crate::project::pool::PoolClip::from_clip(clip.clone());
-                                self.project.audio_pool.push(pool_clip);
-                            }
-                        }
-                        if *track_index < self.track_ui.len() {
-                            self.track_ui.remove(*track_index);
-                        }
-                        self.selected_track = None;
-                        self.effect_editor_state.selected_track = None;
-                    }
-                    undo::UndoCommand::ImportAudio { tracks: snapshots }
-                    | undo::UndoCommand::ImportMidi { tracks: snapshots } => {
-                        for snap in snapshots {
-                            let track = &snap.track;
-                            let track_ui = &snap.track_ui;
-                            let mut handle = crate::project::track::TrackHandle::new();
-                            handle.volume.store(f32::to_bits(track.volume), std::sync::atomic::Ordering::Release);
-                            handle.pan.store(f32::to_bits(track.pan), std::sync::atomic::Ordering::Release);
-                            handle.mute.store(track.mute, std::sync::atomic::Ordering::Release);
-                            handle.solo.store(track.solo, std::sync::atomic::Ordering::Release);
-                            // Restore clips to engine handle
-                            for clip_kind in &track.clips {
-                                match clip_kind {
-                                    crate::project::clip::ClipKind::Audio(audio_clip) => {
-                                        if let Some(buf) = &audio_clip.buffer {
-                                            let ch = crate::project::clip_handle::ClipHandle::new(
-                                                audio_clip.id,
-                                                (**buf.samples()).to_vec(),
-                                                buf.channels(),
-                                                buf.sample_rate(),
-                                            );
-                                            ch.set_position(audio_clip.position_frames);
-                                            ch.set_offset(audio_clip.offset_frames);
-                                            ch.set_length(audio_clip.length_frames);
-                                            handle.add_clip(ch);
-                                        }
-                                    }
-                                    crate::project::clip::ClipKind::Midi(midi_clip) => {
-                                        let ch = crate::project::clip_handle::ClipHandle::new_midi(
-                                            midi_clip.id,
-                                            midi_clip.notes.clone(),
-                                            midi_clip.length_frames,
-                                            sr,
-                                        );
-                                        ch.set_position(midi_clip.position_frames);
-                                        handle.add_clip(ch);
-                                    }
-                                }
-                            }
-                            let idx = tracks.len();
-                            tracks.insert(idx, handle);
-                            self.project.tracks.insert(idx, track.clone());
-                            self.track_ui.insert(idx, track_ui.clone());
-                        }
-                    }
-                    _ => undo::apply_redo(&mut self.project, &mut tracks, cmd, sr),
-                }
-            }
-        }
+        self.coordinator.redo(
+            &mut self.track_ui,
+            &mut self.selected_track,
+            &mut self.effect_editor_state,
+        );
     }
 
     pub fn apply_preferences(&mut self, prefs: &PreferencesState) {
@@ -378,6 +256,8 @@ impl HdawApp {
         );
         self.timeline_state.header_width = prefs.header_width;
         self.timeline_state.track_height = prefs.track_height;
+        self.piano_roll_state.zoom_x = prefs.default_zoom;
+        self.piano_roll_state.zoom_y = prefs.piano_roll_row_height as f64;
         self.mixer_state.visible = prefs.show_mixer_on_start;
         self.audio_pool_state.visible = prefs.show_pool_on_start;
         self.effect_editor_state.show_editor = prefs.show_effect_editor_on_start;
@@ -388,6 +268,26 @@ impl HdawApp {
 
     pub fn scan_plugins(&mut self) {
         self.plugin_registry = crate::audio::clap_scanner::scan_plugins();
+    }
+
+    pub fn toggle_plugin_gui(&mut self, track_idx: usize, effect_idx: usize) {
+        if self.active_plugin_guis.contains_key(&(track_idx, effect_idx)) {
+            // Close GUI
+            if let Ok(mut ts) = self.engine.tracks.lock() {
+                if let Some(t) = ts.get_mut(track_idx) {
+                    if let Some(inst) = t.fx_chain.get_mut(effect_idx) {
+                        if let EffectKind::Clap(adapter) = &inst.kind {
+                             if let Ok(mut a) = adapter.lock() {
+                                 a.close_gui();
+                             }
+                        }
+                    }
+                }
+            }
+            self.active_plugin_guis.remove(&(track_idx, effect_idx));
+        } else {
+            self.active_plugin_guis.insert((track_idx, effect_idx), PluginGuiState { is_open: true, initialized: false });
+        }
     }
 }
 
@@ -420,6 +320,7 @@ impl eframe::App for HdawApp {
         self.preferences.show_effect_editor_on_start = self.effect_editor_state.show_editor;
 
         crate::ui::app_ui::render(self, ctx);
+        self.handle_plugin_guis(ctx, _frame);
         if self.is_playing() {
             ctx.request_repaint();
         }
@@ -427,8 +328,68 @@ impl eframe::App for HdawApp {
 }
 
 impl HdawApp {
+    fn handle_plugin_guis(&mut self, _ctx: &egui::Context, _frame: &eframe::Frame) {
+        let main_hwnd = {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            _frame.window_handle().ok().and_then(|wh| match wh.as_raw() {
+                RawWindowHandle::Win32(w) => Some(w.hwnd.get() as *mut std::ffi::c_void),
+                _ => None,
+            })
+        };
+
+        let entries: Vec<(usize, usize)> = self.active_plugin_guis.keys().copied().collect();
+
+        for (track_idx, effect_idx) in entries {
+            let initialized = self.active_plugin_guis
+                .get(&(track_idx, effect_idx))
+                .map_or(true, |s| s.initialized);
+
+            if !initialized {
+                if let Some(hwnd) = main_hwnd {
+                    if let Ok(mut ts) = self.engine.tracks.lock() {
+                        if let Some(t) = ts.get_mut(track_idx) {
+                            if let Some(inst) = t.fx_chain.get_mut(effect_idx) {
+                                if let EffectKind::Clap(adapter) = &inst.kind {
+                                    if let Ok(mut a) = adapter.lock() {
+                                        match a.open_gui(hwnd) {
+                                            Ok(()) => {
+                                                let _ = a.show_gui();
+                                            }
+                                            Err(e) => {
+                                                self.error_message = Some(format!("Failed to open plugin GUI: {e}"));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(state) = self.active_plugin_guis.get_mut(&(track_idx, effect_idx)) {
+                    state.initialized = true;
+                }
+            }
+        }
+    }
+}
+
+impl HdawApp {
     pub fn toggle_loop(&self) {
         self.engine.transport.toggle_loop();
+    }
+
+    pub fn set_loop_start_at_playhead(&self) {
+        let pos = self.engine.transport.position_frames();
+        let (_, loop_out) = self.engine.transport.load_loop_region();
+        self.engine.transport.set_loop_region(pos, loop_out.max(pos));
+        self.engine.transport.loop_enabled.store(true, Ordering::Release);
+    }
+
+    pub fn set_loop_end_at_playhead(&self) {
+        let pos = self.engine.transport.position_frames();
+        let (loop_in, _) = self.engine.transport.load_loop_region();
+        self.engine.transport.set_loop_region(loop_in.min(pos), pos);
+        self.engine.transport.loop_enabled.store(true, Ordering::Release);
     }
 
     pub fn start_recording(&mut self) {
@@ -504,7 +465,7 @@ impl HdawApp {
 
         let engine_sr = self.engine.transport.sample_rate();
         let samples = if file_sr != engine_sr {
-            crate::app::project_io::resample(&samples, channels, file_sr, engine_sr)
+            crate::app::project_service::resample(&samples, channels, file_sr, engine_sr)
         } else {
             samples
         };
@@ -575,7 +536,7 @@ impl HdawApp {
 
         self.project.audio_pool.push(pool_entry);
 
-        self.undo_state.push(crate::app::undo::UndoCommand::RecordAudio {
+        self.undo_service.push(crate::app::undo::UndoCommand::RecordAudio {
             track_indices: track_indices.clone(),
             clip_ids: engine_clip_ids,
         });
@@ -764,6 +725,7 @@ impl HdawApp {
                 length_frames: duration,
                 notes: notes.clone(),
                 color: [0x1a, 0x2a, 0x3a],
+                cc_events: Vec::new(),
                 thumb_dirty: true,
             };
             let clip_kind = crate::project::clip::ClipKind::Midi(midi_clip);
@@ -802,6 +764,6 @@ impl HdawApp {
             snapshots.push(crate::app::undo::ImportTrackSnapshot::new(project_track, track_ui));
         }
 
-        self.undo_state.push(crate::app::undo::UndoCommand::ImportMidi { tracks: snapshots });
+        self.undo_service.push(crate::app::undo::UndoCommand::ImportMidi { tracks: snapshots });
     }
 }

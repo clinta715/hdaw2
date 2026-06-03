@@ -1,3 +1,4 @@
+use crate::project::cc_event::CCEvent;
 use crate::project::midi_note::MidiNote;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -10,6 +11,8 @@ pub struct MidiClip {
     pub length_frames: u64,
     pub notes: Vec<MidiNote>,
     pub color: [u8; 3],
+    #[serde(default)]
+    pub cc_events: Vec<CCEvent>,
     #[serde(skip)]
     pub thumb_dirty: bool,
 }

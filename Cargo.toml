@@ -1,6 +1,6 @@
 [package]
 name = "hdaw"
-version = "0.3.0"
+version = "0.5.0"
 edition = "2021"
 description = "Hap's Digital Audio Workstation"
 
@@ -20,6 +20,7 @@ clack-host = "0.1"
 clack-extensions = { version = "0.1", features = ["clack-host", "log", "params", "state", "audio-ports", "note-ports", "gui"] }
 base64 = "0.22"
 midly = "0.5"
+raw-window-handle = "0.6"
 
 [profile.release]
 lto = true
