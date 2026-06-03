@@ -5,6 +5,11 @@ use crate::project::midi_clip::MidiClip;
 use crate::ui::timeline::{DragMode, DragState, CLIP_CORNER_RADIUS, RULER_HEIGHT};
 use egui::{pos2, vec2, Color32, Pos2, Rect, Response, Stroke};
 
+const CLIP_LABEL_SIZE: f32 = 10.0;
+const FADE_HANDLE_SIZE: f32 = 10.0;
+const EDGE_HIT: f64 = 6.0;
+const FADE_HIT_AREA: f64 = 14.0;
+
 pub fn draw(
     painter: &egui::Painter,
     lane_rect: &Rect,
@@ -111,7 +116,7 @@ fn draw_audio(
     }
 
     // Draw fade handles
-    let fade_handle_size = 10.0;
+    let fade_handle_size = FADE_HANDLE_SIZE;
     let fade_color = Color32::from_rgba_premultiplied(0x64, 0xb5, 0xf6, 180);
     let fade_stroke = Stroke::new(1.0, Color32::from_rgb(0x64, 0xb5, 0xf6));
 
@@ -162,7 +167,7 @@ fn draw_audio(
     }
 
     if available_w > 40.0 {
-        let small_font = egui::FontId::proportional(10.0);
+        let small_font = egui::FontId::proportional(CLIP_LABEL_SIZE);
         painter.text(
             pos2(clip_rect.left() + 4.0, clip_rect.top() + 2.0),
             egui::Align2::LEFT_TOP,
@@ -288,7 +293,7 @@ fn draw_midi(
     }
 
     if available_w > 40.0 {
-        let small_font = egui::FontId::proportional(10.0);
+        let small_font = egui::FontId::proportional(CLIP_LABEL_SIZE);
         let label = format!("\u{266b} {} notes", clip.notes.len());
         painter.text(
             pos2(clip_rect.left() + 4.0, clip_rect.center().y),
@@ -349,7 +354,7 @@ pub fn handle_interaction(
 
             let left_pixel = (rect.left() + header_width) as f64 + clip_left;
             let right_pixel = left_pixel + clip_width;
-            let edge = 6.0f64;
+            let edge = EDGE_HIT;
 
             if pos.x as f64 >= left_pixel && pos.x as f64 <= right_pixel {
                 hit_clip = true;
@@ -361,8 +366,13 @@ pub fn handle_interaction(
                             let delta_frames = (delta_x / pps * sr_f) as i64;
                             match drag.mode {
                                 DragMode::Move => {
-                                    let new_pos = (drag.original_position_frames as i64 + delta_frames)
+                                    let mut new_pos = (drag.original_position_frames as i64 + delta_frames)
                                         .max(0) as u64;
+                                    if app.timeline_state.snap_enabled {
+                                        let sr = app.engine.transport.sample_rate();
+                                        let bpm = app.project.bpm;
+                                        new_pos = app.timeline_state.snap_frames_to_grid(new_pos, sr, bpm, &app.preferences, &app.project.markers);
+                                    }
                                     app.update_clip_position(track_idx, clip_id, new_pos);
                                 }
                                 DragMode::TrimLeft => {
@@ -398,7 +408,7 @@ pub fn handle_interaction(
                     let track_top = rect.top() + RULER_HEIGHT + track_idx as f32 * track_height
                         + app.timeline_state.scroll_y as f32;
                     let rel_y = local_y - track_top as f64;
-                    let fade_hit_area = 14.0f64;
+                    let fade_hit_area = FADE_HIT_AREA;
                     let (f_in, f_out) = read_fade_frames(clip_kind);
 
                     // Fade handle hit: top corners of clip

@@ -1,5 +1,8 @@
 use crate::app::TrackUiState;
 use egui::{Color32, Context, Slider};
+
+const CHANNEL_WIDTH: f32 = 70.0;
+const MIXER_MIN_HEIGHT: f32 = 160.0;
 use std::sync::atomic::Ordering;
 use uuid::Uuid;
 
@@ -18,10 +21,10 @@ impl Default for MixerPanelState {
 }
 
 pub fn render(ctx: &Context, app: &mut crate::app::HdawApp) {
-    egui::TopBottomPanel::bottom("mixer_panel")
+    let panel_res = egui::TopBottomPanel::bottom("mixer_panel")
         .resizable(true)
-        .default_height(220.0)
-        .min_height(160.0)
+        .default_height(app.preferences.mixer_panel_height)
+        .min_height(MIXER_MIN_HEIGHT)
         .show(ctx, |ui| {
             ui.add_space(4.0);
             egui::ScrollArea::horizontal()
@@ -38,15 +41,15 @@ pub fn render(ctx: &Context, app: &mut crate::app::HdawApp) {
                     });
                 });
         });
+    app.preferences.mixer_panel_height = panel_res.response.rect.height();
 }
 
 fn draw_master(ui: &mut egui::Ui, state: &mut MixerPanelState) {
     ui.vertical(|ui| {
-        ui.set_width(70.0);
-        ui.colored_label(Color32::from_rgb(0xcc, 0xaa, 0x44), "MASTER");
-        ui.add_space(4.0);
+        ui.set_width(CHANNEL_WIDTH);
 
-        ui.horizontal(|ui| {
+        // Master meter
+        {
             let mh = ui.available_height().max(20.0).min(200.0);
             let (master_rect, _) = ui.allocate_exact_size(egui::vec2(12.0, mh), egui::Sense::hover());
             draw_vu_meter(ui, master_rect, state.master_volume, false);
@@ -54,7 +57,7 @@ fn draw_master(ui: &mut egui::Ui, state: &mut MixerPanelState) {
             ui.add(egui::Slider::new(&mut state.master_volume, 0.0..=1.0)
                 .vertical()
                 .show_value(false));
-        });
+        }
 
         ui.add_space(2.0);
         ui.centered_and_justified(|ui| {
@@ -66,8 +69,7 @@ fn draw_master(ui: &mut egui::Ui, state: &mut MixerPanelState) {
 fn draw_channel(ui: &mut egui::Ui, index: usize, app: &mut crate::app::HdawApp) {
     let all_tracks: Vec<TrackUiState> = app.track_ui.clone();
     let tui = &all_tracks[index];
-    let name = tui.name.clone();
-    let color = Color32::from_rgb(tui.color[0], tui.color[1], tui.color[2]);
+    let _color = Color32::from_rgb(tui.color[0], tui.color[1], tui.color[2]);
     let muted = tui.mute.load(Ordering::Acquire);
     let peak_l = f32::from_bits(tui.peak_left.load(Ordering::Acquire));
     let peak_r = f32::from_bits(tui.peak_right.load(Ordering::Acquire));
@@ -79,18 +81,10 @@ fn draw_channel(ui: &mut egui::Ui, index: usize, app: &mut crate::app::HdawApp) 
     let mut vol = f32::from_bits(tui.volume.load(Ordering::Acquire));
 
     ui.vertical(|ui| {
-        ui.set_width(70.0);
+        ui.set_width(CHANNEL_WIDTH);
 
-        ui.add_space(2.0);
-        if is_group {
-            ui.colored_label(Color32::from_rgb(0xcc, 0xaa, 0x44), "GRP");
-        } else if is_return {
-            ui.colored_label(Color32::from_rgb(0xaa, 0x77, 0xcc), "RET");
-        }
-        ui.colored_label(color, &name);
-        ui.add_space(2.0);
-
-        ui.horizontal(|ui| {
+        // Track meter
+        {
             let meter_h = ui.available_height().max(20.0).min(200.0);
             let (meter_rect, _) = ui.allocate_exact_size(egui::vec2(10.0, meter_h), egui::Sense::hover());
             draw_vu_meter(ui, meter_rect, peak, muted);
@@ -101,7 +95,7 @@ fn draw_channel(ui: &mut egui::Ui, index: usize, app: &mut crate::app::HdawApp) 
             if response.changed() {
                 app.track_ui[index].volume.store(vol.to_bits(), Ordering::Release);
             }
-        });
+        }
 
         ui.add_space(2.0);
         ui.centered_and_justified(|ui| {

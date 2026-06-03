@@ -128,11 +128,18 @@ pub fn rebuild_engine_handles(
                         sample_rate,
                     );
                     match adapter {
-                        Ok(a) => EffectInstance::new_clap(
-                            sfx.name.clone(),
-                            sfx.effect_type.clone(),
-                            a,
-                        ),
+                        Ok(mut a) => {
+                            for (i, val) in sfx.param_values.iter().enumerate() {
+                                if let Some(info) = a.parameter_info().get(i) {
+                                    a.set_parameter(info.id, *val);
+                                }
+                            }
+                            EffectInstance::new_clap(
+                                sfx.name.clone(),
+                                sfx.effect_type.clone(),
+                                a,
+                            )
+                        }
                         Err(e) => {
                             tracing::error!("Failed to load CLAP effect {}: {}", plugin_id, e);
                             continue;

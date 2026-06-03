@@ -1,5 +1,9 @@
 use egui::{Button, Context, menu};
 
+const BTN_SIZE: egui::Vec2 = egui::vec2(30.0, 24.0);
+const RECORD_FONT_SIZE: f32 = 14.0;
+const TIME_FONT_SIZE: f32 = 16.0;
+
 pub struct ToolbarState;
 
 impl Default for ToolbarState {
@@ -19,6 +23,7 @@ pub struct ToolbarAction {
     pub save_clicked: bool,
     pub save_as_clicked: bool,
     pub open_clicked: bool,
+    pub open_file: Option<std::path::PathBuf>,
     pub snap_clicked: bool,
     pub undo_clicked: bool,
     pub redo_clicked: bool,
@@ -34,6 +39,7 @@ pub struct ToolbarAction {
     pub preferences_clicked: bool,
     pub metronome_clicked: bool,
     pub export_clicked: bool,
+    pub about_clicked: bool,
 }
 
 impl Default for ToolbarAction {
@@ -49,6 +55,7 @@ impl Default for ToolbarAction {
             save_clicked: false,
             save_as_clicked: false,
             open_clicked: false,
+            open_file: None,
             snap_clicked: false,
             undo_clicked: false,
             redo_clicked: false,
@@ -64,6 +71,7 @@ impl Default for ToolbarAction {
             preferences_clicked: false,
             metronome_clicked: false,
             export_clicked: false,
+            about_clicked: false,
         }
     }
 }
@@ -85,6 +93,7 @@ pub fn render(
     has_selected_track: bool,
     pool_visible: bool,
     has_instruments: bool,
+    recent_files: &[std::path::PathBuf],
 ) -> ToolbarAction {
     let mut action = ToolbarAction::default();
 
@@ -99,6 +108,25 @@ pub fn render(
                 if ui.button("Open...").clicked() {
                     action.open_clicked = true;
                     ui.close_menu();
+                }
+                if !recent_files.is_empty() {
+                    ui.menu_button("Recent Files", |ui| {
+                        for path in recent_files {
+                            let name = path.file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("?")
+                                .to_string();
+                            if ui.button(name).clicked() {
+                                action.open_file = Some(path.clone());
+                                ui.close_menu();
+                            }
+                        }
+                        ui.separator();
+                        if ui.button("Clear Recent").clicked() {
+                            action.open_file = Some(std::path::PathBuf::from("__clear_recent__"));
+                            ui.close_menu();
+                        }
+                    });
                 }
                 ui.separator();
                 if ui.button("Save").clicked() {
@@ -197,6 +225,13 @@ pub fn render(
                     ui.close_menu();
                 }
             });
+
+            ui.menu_button("Help", |ui| {
+                if ui.button("About HDAW...").clicked() {
+                    action.about_clicked = true;
+                    ui.close_menu();
+                }
+            });
         });
     });
 
@@ -206,12 +241,12 @@ pub fn render(
         ui.horizontal(|ui| {
             // Transport Group
             if ui.add(Button::new(if is_playing { "\u{23F8}" } else { "\u{25B6}" })
-                .min_size(egui::vec2(30.0, 24.0)))
+                .min_size(BTN_SIZE))
                 .clicked()
             {
                 if is_playing { action.pause_clicked = true; } else { action.play_clicked = true; }
             }
-            if ui.add(Button::new("\u{25A0}").min_size(egui::vec2(30.0, 24.0))).clicked() {
+            if ui.add(Button::new("\u{25A0}").min_size(BTN_SIZE)).clicked() {
                 action.stop_clicked = true;
             }
 
@@ -234,26 +269,26 @@ pub fn render(
             };
             if ui.add(
                 egui::Button::new(
-                    egui::RichText::new(rec_label).color(rec_color).size(14.0)
+                    egui::RichText::new(rec_label).color(rec_color).size(RECORD_FONT_SIZE)
                 )
-                .min_size(egui::vec2(30.0, 24.0))
+                .min_size(BTN_SIZE)
             )
             .clicked()
             {
                 action.record_clicked = true;
             }
             
-            if ui.add(egui::Button::new("\u{21BA}")  // loop arrow symbol
+            if ui.add(egui::Button::new("\u{21BA}")
                 .selected(loop_enabled)
-                .min_size(egui::vec2(30.0, 24.0)))
+                .min_size(BTN_SIZE))
                 .clicked()
             {
                 action.loop_clicked = true;
             }
 
-            if ui.add(egui::Button::new("\u{2669}")  // metronome (quarter note)
+            if ui.add(egui::Button::new("\u{2669}")
                 .selected(metronome_enabled)
-                .min_size(egui::vec2(30.0, 24.0)))
+                .min_size(BTN_SIZE))
                 .clicked()
             {
                 action.metronome_clicked = true;
@@ -289,7 +324,7 @@ pub fn render(
             let millis = ((position_secs % 1.0) * 1000.0) as u32;
             ui.monospace(egui::RichText::new(format!("{:02}:{:02}.{:03}", mins, secs, millis))
                 .color(egui::Color32::from_rgb(0x8b, 0xc3, 0x4a))
-                .size(16.0));
+                .size(TIME_FONT_SIZE));
 
             ui.separator();
 

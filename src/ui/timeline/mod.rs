@@ -8,6 +8,14 @@ mod track_headers;
 
 use crate::app::HdawApp;
 use egui::{pos2, vec2, Color32, Rect, Response, Sense, Ui};
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(max.saturating_sub(1)).collect::<String>())
+    }
+}
 use std::sync::atomic::Ordering;
 
 const RULER_HEIGHT: f32 = 20.0;
@@ -88,7 +96,7 @@ impl TimelineState {
         let frames_per_beat = sr_f / bps;
         let frames_step = step * frames_per_beat;
         
-        (frames as f64 / frames_step).round() as u64 * frames_step as u64
+        ((frames as f64 / frames_step).round() * frames_step) as u64
     }
 }
 
@@ -255,11 +263,23 @@ fn handle_track_context_menu(ui: &Ui, app: &mut HdawApp) {
     let name = &app.track_ui[track_idx].name;
     let mut close = false;
 
+    let has_instrument = if let Ok(tracks) = app.engine.tracks.lock() {
+        tracks.get(track_idx).map_or(false, |t| t.fx_chain.iter().any(|e| e.has_note_input))
+    } else {
+        false
+    };
+
+    let instruments: Vec<_> = app.plugin_registry.iter()
+        .filter(|d| d.is_instrument)
+        .cloned().collect();
+
     let wr = egui::Window::new(format!("Track: {name}"))
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, (0.0, 0.0))
         .show(ui.ctx(), |ui| {
+            ui.set_min_width(180.0);
+
             if ui.button("Add Effect...").clicked() {
                 app.effect_editor_state.selected_track = Some(track_idx);
                 app.effect_editor_state.show_add_menu = true;
@@ -271,42 +291,119 @@ fn handle_track_context_menu(ui: &Ui, app: &mut HdawApp) {
             if ui.button("New MIDI Clip").clicked() {
                 let sr = app.engine.transport.sample_rate();
                 let pos = app.engine.transport.position_frames();
-                let len = (sr as u64).max(4); // 1 second default
+                let len = (sr as u64).max(4);
                 app.add_midi_clip(track_idx, pos, len);
                 close = true;
             }
 
-            let instruments: Vec<_> = app.plugin_registry.iter()
-                .filter(|d| d.is_instrument)
-                .cloned().collect();
             if !instruments.is_empty() {
                 ui.separator();
-                ui.label("Assign Instrument");
-                for desc in &instruments {
-                    if ui.button(&desc.name).clicked() {
-                        app.assign_instrument(track_idx, &desc);
-                        close = true;
+                let inst_label = if has_instrument { "Change Instrument" } else { "Assign Instrument" };
+                ui.menu_button(inst_label, |ui| {
+                    for desc in &instruments {
+                        if ui.button(truncate(&desc.name, 30)).clicked() {
+                            ui.close_menu();
+                            if has_instrument {
+                                app.replace_instrument(track_idx, desc);
+                            } else {
+                                app.assign_instrument(track_idx, desc);
+                            }
+                            close = true;
+                        }
                     }
-                }
+                });
 
-                ui.separator();
-                ui.label("Replace Instrument");
-                for desc in &instruments {
-                    if ui.button(format!("Replace with {}", desc.name)).clicked() {
-                        app.replace_instrument(track_idx, desc);
+                ui.menu_button("New Track", |ui| {
+                    if ui.button("Blank Track").clicked() {
+                        ui.close_menu();
+                        app.add_blank_track();
                         close = true;
                     }
-                }
-
-                ui.separator();
-                ui.label("Add New Instrument Track");
-                for desc in &instruments {
-                    if ui.button(format!("New {}", desc.name)).clicked() {
-                        app.add_instrument_track(desc);
+                    if ui.button("Group Track").clicked() {
+                        ui.close_menu();
+                        app.add_group_track();
                         close = true;
                     }
-                }
+                    if ui.button("Return Track").clicked() {
+                        ui.close_menu();
+                        app.add_return_track();
+                        close = true;
+                    }
+                    ui.separator();
+                    for desc in &instruments {
+                        if ui.button(truncate(&format!("New {}", desc.name), 30)).clicked() {
+                            ui.close_menu();
+                            app.add_instrument_track(desc);
+                            close = true;
+                        }
+                    }
+                });
             }
+
+            ui.separator();
+            ui.menu_button("Add Automation", |ui| {
+                use crate::project::automation::{AutomationLane, PARAM_PAN, PARAM_VOLUME};
+                let engine = &app.engine;
+                let has_lane = |eid: Option<uuid::Uuid>, pid: u32| -> bool {
+                    if let Ok(tracks) = engine.tracks.lock() {
+                        tracks.get(track_idx).map_or(false, |t| {
+                            t.automation_lanes.iter().any(|l| l.effect_instance_id == eid && l.param_id == pid)
+                        })
+                    } else { false }
+                };
+
+                let mut toggle = |track: usize, eid: Option<uuid::Uuid>, pid: u32, pname: &str| {
+                    let lane = match eid {
+                        Some(id) => AutomationLane::new_effect(pid, pname.to_string(), id),
+                        None => AutomationLane::new(pid, pname.to_string()),
+                    };
+                    if let Ok(mut ts) = engine.tracks.lock() {
+                        if let Some(t) = ts.get_mut(track) {
+                            if let Some(idx) = t.automation_lanes.iter().position(|l| l.effect_instance_id == eid && l.param_id == pid) {
+                                t.automation_lanes.remove(idx);
+                            } else {
+                                t.automation_lanes.push(lane.clone());
+                            }
+                        }
+                    }
+                    if let Some(track) = app.project.tracks.get_mut(track) {
+                        if let Some(idx) = track.automation_lanes.iter().position(|l| l.effect_instance_id == eid && l.param_id == pid) {
+                            track.automation_lanes.remove(idx);
+                        } else {
+                            track.automation_lanes.push(lane);
+                        }
+                    }
+                };
+
+                for &(name, pid) in &[("Volume", PARAM_VOLUME), ("Pan", PARAM_PAN)] {
+                    let checked = has_lane(None, pid);
+                    let label = if checked { format!("{name}  ✓") } else { name.to_string() };
+                    if ui.selectable_label(false, label).clicked() {
+                        ui.close_menu();
+                        toggle(track_idx, None, pid, name);
+                        close = true;
+                    }
+                }
+
+                if let Ok(tracks) = engine.tracks.lock() {
+                    if let Some(track) = tracks.get(track_idx) {
+                        for inst in &track.fx_chain {
+                            if inst.parameter_info().is_empty() { continue; }
+                            ui.menu_button(&inst.name, |ui| {
+                                for p in inst.parameter_info() {
+                                    let checked = has_lane(Some(inst.id), p.id);
+                                    let label = if checked { format!("{}  ✓", p.name) } else { p.name.clone() };
+                                    if ui.selectable_label(false, label).clicked() {
+                                        ui.close_menu();
+                                        toggle(track_idx, Some(inst.id), p.id, &p.name);
+                                        close = true;
+                                    }
+                                }
+                            });
+                        }
+                    }
+                }
+            });
 
             ui.separator();
             if ui.add(egui::Button::new("Delete Track").fill(Color32::from_rgb(0x88, 0x22, 0x22))).clicked() {

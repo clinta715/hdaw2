@@ -2,6 +2,12 @@ use crate::audio::effects::dsp_effect::EffectType;
 use crate::dsp::biquad;
 use egui::{pos2, Color32, Pos2, Rect, Shape, Stroke, Vec2};
 
+const GRAPH_HEIGHT: f32 = 120.0;
+const GRAPH_MARGIN: f32 = 8.0;
+const LABEL_FONT_SIZE: f32 = 8.0;
+const NUM_SAMPLE_POINTS: usize = 200;
+const FREQ_LABEL_WIDTH: f32 = 30.0;
+
 pub(super) struct FxData {
     pub(super) type_name: String,
     pub(super) etype: EffectType,
@@ -18,14 +24,14 @@ pub(super) struct ParamData {
 }
 
 pub(super) fn draw(ui: &mut egui::Ui, fx: &FxData, sample_rate: u32) {
-    let (id, rect) = ui.allocate_space(Vec2::new(ui.available_width(), 120.0));
+    let (id, rect) = ui.allocate_space(Vec2::new(ui.available_width(), GRAPH_HEIGHT));
     let _ = ui.interact(rect, id, egui::Sense::hover());
     let painter = ui.painter();
     let bg = Rect::from_min_size(rect.min, Vec2::new(rect.width(), rect.height()));
     painter.rect_filled(bg, 2.0, Color32::from_rgb(0x15, 0x15, 0x15));
     painter.rect_stroke(bg, 2.0, Stroke::new(1.0, Color32::from_rgb(0x33, 0x33, 0x33)));
 
-    let margin = 8.0;
+    let margin = GRAPH_MARGIN;
     let graph = Rect::from_min_max(
         pos2(rect.left() + margin, rect.top() + margin),
         pos2(rect.right() - margin, rect.bottom() - margin),
@@ -37,17 +43,17 @@ pub(super) fn draw(ui: &mut egui::Ui, fx: &FxData, sample_rate: u32) {
         Stroke::new(1.0, Color32::from_rgb(0x3a, 0x3a, 0x3a)),
     );
 
-    fn small() -> egui::FontId { egui::FontId::proportional(8.0) }
-    painter.text(pos2(graph.left(), graph.bottom() + 6.0), egui::Align2::LEFT_TOP, "20Hz", small(), Color32::from_gray(100));
-    painter.text(pos2(graph.right() - 30.0, graph.bottom() + 6.0), egui::Align2::LEFT_TOP, "20kHz", small(), Color32::from_gray(100));
-    painter.text(pos2(graph.left() - 2.0, graph.top()), egui::Align2::RIGHT_TOP, "+15dB", small(), Color32::from_gray(100));
-    painter.text(pos2(graph.left() - 2.0, graph.bottom() - 8.0), egui::Align2::RIGHT_BOTTOM, "-15dB", small(), Color32::from_gray(100));
+    fn label_font() -> egui::FontId { egui::FontId::proportional(LABEL_FONT_SIZE) }
+    painter.text(pos2(graph.left(), graph.bottom() + 6.0), egui::Align2::LEFT_TOP, "20Hz", label_font(), Color32::from_gray(100));
+    painter.text(pos2(graph.right() - FREQ_LABEL_WIDTH, graph.bottom() + 6.0), egui::Align2::LEFT_TOP, "20kHz", label_font(), Color32::from_gray(100));
+    painter.text(pos2(graph.left() - 2.0, graph.top()), egui::Align2::RIGHT_TOP, "+15dB", label_font(), Color32::from_gray(100));
+    painter.text(pos2(graph.left() - 2.0, graph.bottom() - 8.0), egui::Align2::RIGHT_BOTTOM, "-15dB", label_font(), Color32::from_gray(100));
 
     let freq_min = 20.0;
     let freq_max = 20000.0;
     let db_min = -15.0;
     let db_max = 15.0;
-    let num_points = 200;
+    let num_points = NUM_SAMPLE_POINTS;
 
     let btypes = [
         biquad::BiquadType::LowShelf,

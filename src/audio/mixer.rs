@@ -34,10 +34,21 @@ impl MasterBus {
         let mut peak_r = 0.0f32;
 
         for i in 0..left.len() {
-            left[i] *= vol;
-            right[i] *= vol;
-            peak_l = peak_l.max(left[i].abs());
-            peak_r = peak_r.max(right[i].abs());
+            let mut l = left[i];
+            let mut r = right[i];
+            
+            // NAN/Inf protection
+            if !l.is_finite() { l = 0.0; }
+            if !r.is_finite() { r = 0.0; }
+
+            l *= vol;
+            r *= vol;
+            
+            left[i] = l;
+            right[i] = r;
+
+            peak_l = peak_l.max(l.abs());
+            peak_r = peak_r.max(r.abs());
         }
 
         self.peak_left.store(peak_l.to_bits(), Ordering::Release);

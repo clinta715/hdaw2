@@ -1,7 +1,27 @@
-use crate::app::HdawApp;
 use crate::app::prefs_io;
+use crate::app::{HdawApp, UnsavedChangesAction};
 use crate::project::clip::ClipKind;
 use egui_file_dialog::{DialogState, FileDialog};
+
+pub fn execute_confirm_action(app: &mut HdawApp, action: Option<UnsavedChangesAction>) {
+    match action {
+        Some(UnsavedChangesAction::NewProject) => app.new_project(),
+        Some(UnsavedChangesAction::OpenProject) => {
+            if let Some(path) = app.pending_open_path.take() {
+                if let Err(e) = app.load_project_file(path.to_str().unwrap_or("")) {
+                    app.error_message = Some(e);
+                } else {
+                    app.preferences.push_recent_file(path);
+                    crate::app::prefs_io::save_preferences(&app.preferences);
+                }
+            } else {
+                app.open_requested = true;
+            }
+        }
+        Some(UnsavedChangesAction::CloseApp) => {}
+        None => {}
+    }
+}
 
 pub fn handle_keyboard_input(app: &mut HdawApp, ctx: &egui::Context) {
     ctx.input_mut(|input| {
@@ -120,8 +140,12 @@ pub fn handle_pending_requests(app: &mut HdawApp, ctx: &egui::Context) {
     }
 
     if app.new_project_requested {
-        app.new_project();
         app.new_project_requested = false;
+        if app.undo_service.can_undo() && app.confirm_unsaved.is_none() {
+            app.confirm_unsaved = Some(crate::app::UnsavedChangesAction::NewProject);
+        } else {
+            app.new_project();
+        }
     }
 
     if app.save_as_requested {
@@ -137,6 +161,10 @@ pub fn handle_pending_requests(app: &mut HdawApp, ctx: &egui::Context) {
             if let Err(e) = app.save_current_project(path.to_str().unwrap_or("")) {
                 app.error_message = Some(e);
             }
+            app.preferences.push_recent_file(path.clone());
+            prefs_io::save_preferences(&app.preferences);
+            let pending = app.pending_after_save.take();
+            execute_confirm_action(app, pending);
         } else {
             let mut dialog = make_dialog_with_dir(app.preferences.last_save_dir.as_ref());
             dialog.save_file();
@@ -146,9 +174,13 @@ pub fn handle_pending_requests(app: &mut HdawApp, ctx: &egui::Context) {
 
     if app.open_requested {
         app.open_requested = false;
-        let mut dialog = make_dialog_with_dir(app.preferences.last_open_dir.as_ref());
-        dialog.pick_file();
-        app.open_dialog = Some(dialog);
+        if app.undo_service.can_undo() && app.confirm_unsaved.is_none() {
+            app.confirm_unsaved = Some(crate::app::UnsavedChangesAction::OpenProject);
+        } else {
+            let mut dialog = make_dialog_with_dir(app.preferences.last_open_dir.as_ref());
+            dialog.pick_file();
+            app.open_dialog = Some(dialog);
+        }
     }
 
     if app.export_requested {
@@ -255,11 +287,14 @@ pub fn handle_pending_requests(app: &mut HdawApp, ctx: &egui::Context) {
             match dialog.state().clone() {
                 DialogState::Selected(path) => {
                     app.preferences.last_save_dir = path.parent().map(|p| p.to_path_buf());
+                    app.preferences.push_recent_file(path.clone());
                     prefs_io::save_preferences(&app.preferences);
                     if let Err(e) = app.save_current_project(path.to_str().unwrap_or("")) {
                         app.error_message = Some(e);
                     }
                     app.save_dialog = None;
+                    let pending = app.pending_after_save.take();
+                    execute_confirm_action(app, pending);
                 }
                 DialogState::Cancelled => {
                     app.save_dialog = None;
@@ -276,6 +311,7 @@ pub fn handle_pending_requests(app: &mut HdawApp, ctx: &egui::Context) {
             match dialog.state().clone() {
                 DialogState::Selected(path) => {
                     app.preferences.last_open_dir = path.parent().map(|p| p.to_path_buf());
+                    app.preferences.push_recent_file(path.clone());
                     prefs_io::save_preferences(&app.preferences);
                     if let Err(e) = app.load_project_file(path.to_str().unwrap_or("")) {
                         app.error_message = Some(e);

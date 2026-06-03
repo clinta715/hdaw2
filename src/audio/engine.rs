@@ -176,10 +176,17 @@ impl AudioEngine {
     pub fn is_recording(&self) -> bool {
         self.recording.lock().ok().map_or(false, |r| r.is_some())
     }
+
+    pub fn shutdown(&mut self) {
+        self.transport.stop();
+        self._stream = None;
+        tracing::info!("audio engine shutdown");
+    }
 }
 
 pub fn audio_callback(
     data: &mut [f32],
+    channels: u16,
     transport: &Arc<Transport>,
     master_bus: &Arc<MasterBus>,
     tracks: &Arc<Mutex<Vec<TrackHandle>>>,
@@ -198,24 +205,67 @@ pub fn audio_callback(
         data.fill(0.0);
         return;
     }
-    let frames = data.len() / 2;
-    let pos = transport.position_frames() as usize;
-    let sample_rate = transport.sample_rate();
-    let seek_occurred = transport.seek_occurred.swap(false, Ordering::Acquire);
 
-    stream::mix_tracks(&mut track_list, data, pos, frames, sample_rate, master_bus, transport, seek_occurred);
-    transport.advance_frames(frames as u64);
-    check_loop_wrap(transport);
+    let sample_rate = transport.sample_rate();
+    let mut frames_remaining = data.len() / channels as usize;
+    let mut data_offset = 0;
+
+    while frames_remaining > 0 {
+        let pos = transport.position_frames();
+        let mut frames_to_process = frames_remaining;
+
+        // If looping is enabled, don't process past the loop end
+        if transport.loop_enabled.load(Ordering::Acquire) {
+            let (loop_in, loop_out) = transport.load_loop_region();
+            if loop_in < loop_out && pos < loop_out {
+                let frames_to_loop_end = (loop_out - pos) as usize;
+                frames_to_process = frames_to_process.min(frames_to_loop_end);
+            }
+        }
+
+        if frames_to_process > 0 {
+            let slice_start = data_offset * channels as usize;
+            let slice_end = (data_offset + frames_to_process) * channels as usize;
+            let slice = &mut data[slice_start..slice_end];
+            
+            let seek_occurred = transport.seek_occurred.swap(false, Ordering::Acquire);
+            stream::mix_tracks(
+                &mut track_list,
+                slice,
+                channels,
+                pos as usize,
+                frames_to_process,
+                sample_rate,
+                master_bus,
+                transport,
+                seek_occurred,
+            );
+
+            transport.advance_frames(frames_to_process as u64);
+            frames_remaining -= frames_to_process;
+            data_offset += frames_to_process;
+        }
+
+        // Check if we need to wrap around the loop
+        let wrapped = check_loop_wrap(transport);
+        
+        // If we didn't process any frames and didn't wrap, break to avoid infinite loop
+        if frames_to_process == 0 && !wrapped {
+            break;
+        }
+    }
 }
 
-fn check_loop_wrap(transport: &Arc<Transport>) {
+fn check_loop_wrap(transport: &Arc<Transport>) -> bool {
     if transport.loop_enabled.load(Ordering::Acquire) {
         let pos = transport.position_frames();
         let (loop_in, loop_out) = transport.load_loop_region();
         if pos >= loop_out && loop_in < loop_out {
             transport.seek_to_frame(loop_in);
+            return true;
         }
     }
+    false
 }
 
 impl Default for AudioEngine {

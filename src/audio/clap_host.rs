@@ -1,5 +1,6 @@
 use clack_host::prelude::*;
 use clack_extensions::log::{HostLog, HostLogImpl, LogSeverity};
+use clack_extensions::gui::{HostGui, HostGuiImpl, GuiSize};
 
 pub struct HdawClapHost;
 
@@ -32,6 +33,31 @@ impl HostLogImpl for HdawClapHostShared {
     }
 }
 
+impl HostGuiImpl for HdawClapHostShared {
+    fn resize_hints_changed(&self) {
+        tracing::debug!("CLAP plugin resize hints changed");
+    }
+
+    fn request_resize(&self, size: GuiSize) -> Result<(), HostError> {
+        tracing::debug!("CLAP plugin requested resize to {}x{}", size.width, size.height);
+        Ok(())
+    }
+
+    fn request_show(&self) -> Result<(), HostError> {
+        tracing::debug!("CLAP plugin requested show");
+        Ok(())
+    }
+
+    fn request_hide(&self) -> Result<(), HostError> {
+        tracing::debug!("CLAP plugin requested hide");
+        Ok(())
+    }
+
+    fn closed(&self, was_destroyed: bool) {
+        tracing::debug!("CLAP plugin GUI closed (destroyed: {})", was_destroyed);
+    }
+}
+
 impl HostHandlers for HdawClapHost {
     type Shared<'a> = HdawClapHostShared;
     type MainThread<'a> = ();
@@ -39,10 +65,11 @@ impl HostHandlers for HdawClapHost {
 
     fn declare_extensions(builder: &mut HostExtensions<Self>, _shared: &Self::Shared<'_>) {
         builder.register::<HostLog>();
+        builder.register::<HostGui>();
     }
 }
 
 pub fn make_host_info() -> Result<HostInfo, HostError> {
-    HostInfo::new("HDAW", "HDAW", "https://github.com/clinta715/hdaw2", "0.1.0")
+    HostInfo::new("HDAW", "HDAW", "https://github.com/clinta715/hdaw2", "0.4.0")
         .map_err(|e| HostError::from(e))
 }

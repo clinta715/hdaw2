@@ -661,7 +661,6 @@ impl HdawApp {
             if let Some(ClipKind::Midi(clip)) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Midi(m) if m.id == clip_id)) {
                 if note_idx < clip.notes.len() {
                     clip.notes[note_idx] = new_note.clone();
-                    clip.notes.sort_by_key(|n| n.start_frame);
                     clip.thumb_dirty = true;
                 }
             }
@@ -671,7 +670,6 @@ impl HdawApp {
                 if let Some(ch) = handle.clips.iter_mut().find(|c| c.clip_id == clip_id) {
                     if note_idx < ch.midi_notes.len() {
                         ch.midi_notes[note_idx] = new_note.clone();
-                        ch.midi_notes.sort_by_key(|n| n.start_frame);
                     }
                 }
             }

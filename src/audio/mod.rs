@@ -1,10 +1,12 @@
+pub mod automation_proc;
 pub mod buffer;
-pub mod clap_scanner;
+pub mod clap_effect;
 pub mod clap_host;
 pub mod clap_instance;
-pub mod clap_effect;
+pub mod clap_scanner;
 pub mod effects;
 pub mod engine;
+pub mod midi_dispatch;
 pub mod mixer;
 pub mod process;
 pub mod record;

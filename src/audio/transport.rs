@@ -46,6 +46,7 @@ impl Transport {
     pub fn stop(&self) {
         self.playing.store(false, Ordering::Release);
         self.position_frames.store(0, Ordering::Release);
+        self.seek_occurred.store(true, Ordering::Release);
     }
 
     pub fn pause(&self) {

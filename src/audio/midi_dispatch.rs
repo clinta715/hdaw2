@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::sync::atomic::Ordering;
 
 thread_local! {
-    static MIDI_EVENTS: RefCell<EventBuffer> = RefCell::new(EventBuffer::with_capacity(128));
+    static MIDI_EVENTS: RefCell<EventBuffer> = RefCell::new(EventBuffer::with_capacity(512));
 }
 
 /// Scans all MIDI clips on the track, builds NoteOn/NoteOff events for the
@@ -41,6 +41,9 @@ pub fn dispatch_midi(
 
     if let EffectKind::Clap(adapter) = &handle.fx_chain[ii].kind {
         if let Ok(mut a) = adapter.try_lock() {
+            if seek_occurred {
+                a.reset();
+            }
             MIDI_EVENTS.with(|eb| {
                 let mut buf = eb.borrow_mut();
                 buf.clear();
@@ -79,6 +82,8 @@ pub fn dispatch_midi(
                         {
                             let pckn = Pckn::new(0u8, 0u8, note.pitch, 0u8);
                             buf.push(&NoteOffEvent::new(0, pckn, 0.0));
+                            // NoteOn at offset 1 (not 0) to prevent unstable-sort reordering
+                            // with the NoteOff at offset 0
                             buf.push(&NoteOnEvent::new(
                                 1,
                                 pckn,
@@ -89,25 +94,34 @@ pub fn dispatch_midi(
                         {
                             if note_start_timeline >= clip_start {
                                 let offset = (note_start_timeline - buf_start) as u32;
-                                let pckn = Pckn::new(0u8, 0u8, note.pitch, 0u8);
-                                let vel = note.velocity as f64 / 127.0;
-                                buf.push(&NoteOnEvent::new(offset, pckn, vel));
+                                if offset < frames as u32 {
+                                    let pckn = Pckn::new(0u8, 0u8, note.pitch, 0u8);
+                                    let vel = note.velocity as f64 / 127.0;
+                                    buf.push(&NoteOnEvent::new(offset, pckn, vel));
+                                }
                             }
                         }
 
                         if note_end_timeline >= buf_start && note_end_timeline < buf_end {
                             if note_end_timeline <= clip_end {
                                 let offset = (note_end_timeline - buf_start) as u32;
-                                let pckn = Pckn::new(0u8, 0u8, note.pitch, 0u8);
-                                buf.push(&NoteOffEvent::new(offset, pckn, 0.0));
+                                if offset < frames as u32 {
+                                    let pckn = Pckn::new(0u8, 0u8, note.pitch, 0u8);
+                                    buf.push(&NoteOffEvent::new(offset, pckn, 0.0));
+                                }
                             }
                         } else if note_end_timeline > clip_end
                             && clip_end >= buf_start
-                            && clip_end < buf_end
+                            && clip_end <= buf_end
                         {
-                            let offset = (clip_end - buf_start) as u32;
-                            let pckn = Pckn::new(0u8, 0u8, note.pitch, 0u8);
-                            buf.push(&NoteOffEvent::new(offset, pckn, 0.0));
+                            // NoteOff at the last sample before clip_end (not at clip_end itself,
+                            // since clip_end is exclusive). When clip_end == buf_end, the offset
+                            // would be frames-1 (last sample of the buffer).
+                            let offset = clip_end.saturating_sub(1).saturating_sub(buf_start) as u32;
+                            if offset < frames as u32 {
+                                let pckn = Pckn::new(0u8, 0u8, note.pitch, 0u8);
+                                buf.push(&NoteOffEvent::new(offset, pckn, 0.0));
+                            }
                         }
                     }
 
@@ -117,8 +131,10 @@ pub fn dispatch_midi(
                                 as u64;
                         if cc_timeline >= buf_start && cc_timeline < buf_end && cc_timeline <= clip_end {
                             let offset = (cc_timeline - buf_start) as u32;
-                            let val_7bit = (cc.value * 127.0).round().clamp(0.0, 127.0) as u8;
-                            buf.push(&MidiEvent::new(offset, 0, [0xB0, cc.cc_number, val_7bit]));
+                            if offset < frames as u32 {
+                                let val_7bit = (cc.value * 127.0).round().clamp(0.0, 127.0) as u8;
+                                buf.push(&MidiEvent::new(offset, 0, [0xB0, cc.cc_number, val_7bit]));
+                            }
                         }
                     }
                 }

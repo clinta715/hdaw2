@@ -35,7 +35,7 @@ pub struct ClapEffectAdapter {
     output_ports: Option<Box<AudioPorts>>,
     pub has_note_input: bool,
     pub gui_supported: bool,
-    params_initialized: bool,
+    gui_created: bool,
     pending_params: Mutex<Vec<(u32, f64)>>,
 }
 
@@ -43,6 +43,7 @@ unsafe impl Send for ClapEffectAdapter {}
 
 impl Drop for ClapEffectAdapter {
     fn drop(&mut self) {
+        self.close_gui();
         self.deactivate();
     }
 }
@@ -77,8 +78,9 @@ impl ClapEffectAdapter {
             for i in 0..count {
                 if let Some(info) = params.get_info(&mut handle, i, &mut buf) {
                     let name = String::from_utf8_lossy(info.name).into_owned();
+                    let param_id = info.id.get();
                 infos.push(ParameterInfo {
-                    id: i as ParamId,
+                    id: param_id,
                         name: name.clone(),
                         label: String::new(),
                         min_value: info.min_value as f32,
@@ -155,7 +157,7 @@ impl ClapEffectAdapter {
             output_ports: Some(Box::new(AudioPorts::with_capacity(2, 1))),
             has_note_input,
             gui_supported,
-            params_initialized: false,
+            gui_created: false,
             pending_params: Mutex::new(Vec::new()),
         })
     }
@@ -202,6 +204,9 @@ impl ClapEffectAdapter {
     }
 
     pub fn open_gui(&mut self, parent: *mut std::ffi::c_void) -> Result<(), String> {
+        if self.gui_created {
+            return Ok(());
+        }
         let instance = self.instance.as_mut().ok_or("No instance")?;
         let gui_ext = instance.plugin_shared_handle().get_extension::<PluginGui>().ok_or("No GUI extension")?;
         let mut handle = instance.plugin_handle();
@@ -229,11 +234,14 @@ impl ClapEffectAdapter {
         gui_ext.create(&mut handle, config)
             .map_err(|e| format!("Failed to create GUI: {:?}", e))?;
 
-        unsafe {
-            gui_ext.set_parent(&mut handle, clack_extensions::gui::Window::from_win32_hwnd(parent as _))
-                .map_err(|e| format!("Failed to set GUI parent: {:?}", e))?;
+        if !config.is_floating {
+            unsafe {
+                gui_ext.set_parent(&mut handle, clack_extensions::gui::Window::from_win32_hwnd(parent as _))
+                    .map_err(|e| format!("Failed to set GUI parent: {:?}", e))?;
+            }
         }
 
+        self.gui_created = true;
         Ok(())
     }
 
@@ -245,11 +253,21 @@ impl ClapEffectAdapter {
     }
 
     pub fn close_gui(&mut self) {
+        if !self.gui_created {
+            return;
+        }
         if let Some(instance) = &mut self.instance {
             if let Some(gui_ext) = instance.plugin_shared_handle().get_extension::<PluginGui>() {
                 let mut handle = instance.plugin_handle();
                 let _ = gui_ext.destroy(&mut handle);
             }
+        }
+        self.gui_created = false;
+    }
+
+    pub fn reset(&mut self) {
+        if let Some(processor) = &mut self.audio_processor {
+            processor.reset();
         }
     }
 
@@ -281,14 +299,12 @@ impl ClapEffectAdapter {
         };
 
         let Ok(started) = processor.ensure_processing_started() else {
-            tracing::warn!(
-                name = self.state.name(),
-                "ensure_processing_started failed — plugin will not produce audio"
-            );
             return;
         };
 
         let frames = input_l.len().min(input_r.len());
+        if frames == 0 { return; }
+
         let i_ports = match &mut self.input_ports {
             Some(p) => p,
             None => return,
@@ -302,114 +318,83 @@ impl ClapEffectAdapter {
         SCRATCH_IN_R.with(|sr| {
         SCRATCH_OUT_L.with(|sol| {
         SCRATCH_OUT_R.with(|sor| {
-        let mut in_l_buf = sl.borrow_mut();
-        let mut in_r_buf = sr.borrow_mut();
-        let mut out_l_buf = sol.borrow_mut();
-        let mut out_r_buf = sor.borrow_mut();
+            let mut in_l_buf = sl.borrow_mut();
+            let mut in_r_buf = sr.borrow_mut();
+            let mut out_l_buf = sol.borrow_mut();
+            let mut out_r_buf = sor.borrow_mut();
 
-        in_l_buf.clear();
-        in_l_buf.extend_from_slice(input_l);
-        in_r_buf.clear();
-        in_r_buf.extend_from_slice(input_r);
-        out_l_buf.clear();
-        out_l_buf.resize(frames, 0.0);
-        out_r_buf.clear();
-        out_r_buf.resize(frames, 0.0);
+            in_l_buf.clear();
+            in_l_buf.extend_from_slice(input_l);
+            in_r_buf.clear();
+            in_r_buf.extend_from_slice(input_r);
+            
+            out_l_buf.clear();
+            out_l_buf.resize(frames, 0.0);
+            out_r_buf.clear();
+            out_r_buf.resize(frames, 0.0);
 
-        let audio_inputs = i_ports.with_input_buffers([AudioPortBuffer {
-            latency: 0,
-            channels: AudioPortBufferType::f32_input_only(
-                [in_l_buf.as_mut_slice(), in_r_buf.as_mut_slice()]
-                    .into_iter()
-                    .map(|b| InputChannel::variable(b)),
-            ),
-        }]);
-
-        let mut audio_outputs =
-            o_ports.with_output_buffers([AudioPortBuffer {
+            let audio_inputs = i_ports.with_input_buffers([AudioPortBuffer {
                 latency: 0,
-                channels: AudioPortBufferType::f32_output_only(
-                    [out_l_buf.as_mut_slice(), out_r_buf.as_mut_slice()]
-                        .into_iter(),
+                channels: AudioPortBufferType::f32_input_only(
+                    [in_l_buf.as_mut_slice(), in_r_buf.as_mut_slice()]
+                        .into_iter()
+                        .map(|b| InputChannel::variable(b)),
                 ),
             }]);
 
-        let mut output_events = OutputEvents::void();
+            let out_slices = [out_l_buf.as_mut_slice(), out_r_buf.as_mut_slice()];
+            let mut audio_outputs =
+                o_ports.with_output_buffers([AudioPortBuffer {
+                    latency: 0,
+                    channels: AudioPortBufferType::f32_output_only(
+                        out_slices.into_iter()
+                    ),
+                }]);
 
-        COMBINED_EVENTS.with(|ceb| {
-            let mut combined = ceb.borrow_mut();
-            combined.clear();
+            let mut output_events = OutputEvents::void();
 
-            // On first process, flush all default parameter values to the plugin.
-            // CLAP plugins don't auto-initialize params after activate(); we must
-            // explicitly send defaults so the plugin starts in a known state.
-            if !self.params_initialized {
-                self.params_initialized = true;
-                let pckn = Pckn::new(0u8, 0u8, 0u8, 0u8);
-                for info in self.state.parameter_info() {
-                    let ev = ParamValueEvent::new(
-                        0,
-                        ClapId::from(info.id),
-                        pckn,
-                        info.default_value as f64,
-                        Cookie::default(),
-                    );
-                    combined.push(&ev);
+            COMBINED_EVENTS.with(|ceb| {
+                let mut combined = ceb.borrow_mut();
+                combined.clear();
+
+                // Copy all input events into combined buffer
+                for event in input_events.iter() {
+                    combined.push(event);
                 }
-            }
 
-            // Copy all input events into combined buffer
-            for event in input_events.iter() {
-                combined.push(event);
-            }
-
-            // Add pending param changes (non-blocking in audio thread)
-            if let Ok(mut pending) = self.pending_params.try_lock() {
-                let pckn = Pckn::new(0u8, 0u8, 0u8, 0u8);
-                for &(id, value) in pending.iter() {
-                    let ev = ParamValueEvent::new(
-                        0,
-                        ClapId::from(id),
-                        pckn,
-                        value,
-                        Cookie::default(),
-                    );
-                    combined.push(&ev);
+                // Add pending param changes
+                if let Ok(mut pending) = self.pending_params.try_lock() {
+                    let pckn = Pckn::new(0u8, 0u8, 0u8, 0u8);
+                    for &(id, value) in pending.iter() {
+                        let ev = ParamValueEvent::new(
+                            0,
+                            ClapId::from(id),
+                            pckn,
+                            value,
+                            Cookie::default(),
+                        );
+                        combined.push(&ev);
+                    }
+                    pending.clear();
                 }
-                pending.clear();
-            }
 
-            combined.sort();
+                combined.sort();
 
-            let events = combined.as_input();
-            if let Err(e) = started.process(
-                &audio_inputs,
-                &mut audio_outputs,
-                &events,
-                &mut output_events,
-                None,
-                None,
-            ) {
-                tracing::warn!("CLAP process error: {:?}", e);
-            }
-        });
-        drop(audio_outputs);
-        drop(audio_inputs);
+                let events = combined.as_input();
+                if let Err(e) = started.process(
+                    &audio_inputs,
+                    &mut audio_outputs,
+                    &events,
+                    &mut output_events,
+                    None,
+                    None,
+                ) {
+                    tracing::warn!("CLAP process error: {:?}", e);
+                }
+            });
 
-        if self.has_note_input {
-            let has_out = out_l_buf.iter().any(|&s| s.abs() > 1e-10)
-                || out_r_buf.iter().any(|&s| s.abs() > 1e-10);
-            if !has_out {
-                tracing::warn!(
-                    name = self.state.name(),
-                    "process() returned Ok but produced zero output despite being an instrument"
-                );
-            }
-        }
-
-        let written = frames.min(out_l_buf.len());
-        input_l[..written].copy_from_slice(&out_l_buf[..written]);
-        input_r[..written].copy_from_slice(&out_r_buf[..written]);
+            input_l[..frames].copy_from_slice(&out_l_buf[..frames]);
+            input_r[..frames].copy_from_slice(&out_r_buf[..frames]);
         });});});});
     }
 }

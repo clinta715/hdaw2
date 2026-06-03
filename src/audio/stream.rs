@@ -86,7 +86,7 @@ pub fn build_stream(
             channels,
         },
         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            super::engine::audio_callback(data, &transport, &master_bus, &tracks);
+            super::engine::audio_callback(data, channels, &transport, &master_bus, &tracks);
         },
         move |_err| {
             rebuild_flag.store(true, Ordering::Release);
@@ -106,6 +106,7 @@ pub fn build_stream(
 pub fn mix_tracks(
     track_list: &mut std::sync::MutexGuard<Vec<TrackHandle>>,
     data: &mut [f32],
+    channels: u16,
     pos: usize,
     frames: usize,
     sample_rate: u32,
@@ -405,8 +406,18 @@ pub fn mix_tracks(
     }
 
     for i in 0..frames {
-        data[i * 2] = out_l[i];
-        data[i * 2 + 1] = out_r[i];
+        for c in 0..channels as usize {
+            let idx = i * channels as usize + c;
+            if idx < data.len() {
+                if c == 0 {
+                    data[idx] = out_l[i];
+                } else if c == 1 {
+                    data[idx] = out_r[i];
+                } else {
+                    data[idx] = 0.0;
+                }
+            }
+        }
     }
     });});});});});});
 }

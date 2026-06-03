@@ -5,6 +5,14 @@ use crate::audio::effects::create_effect;
 use crate::audio::effects::dsp_effect::{EffectInstance, EffectType};
 use crate::project::automation::AutomationLane;
 use egui::{Color32, Context, SidePanel, Slider, Vec2};
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(max.saturating_sub(1)).collect::<String>())
+    }
+}
 use eq_graph::{FxData, ParamData};
 
 pub struct EffectEditorState {
@@ -31,7 +39,7 @@ fn read_fx_chain(app: &HdawApp, track_idx: usize) -> (Vec<FxData>, String) {
     let Ok(tracks) = app.engine.tracks.lock() else { return (Vec::new(), name) };
     let Some(track) = tracks.get(track_idx) else { return (Vec::new(), name) };
     let data = track.fx_chain.iter().map(|inst| FxData {
-        type_name: format!("{:?}", inst.effect_type),
+        type_name: inst.name.clone(),
         etype: inst.effect_type.clone(),
         bypass: inst.is_bypassed(),
         params: inst.parameter_info().iter().map(|p| ParamData {
@@ -85,6 +93,7 @@ fn write_param(app: &mut HdawApp, track_idx: usize, effect_idx: usize, param_id:
 }
 
 fn remove_effect(app: &mut HdawApp, track_idx: usize, effect_idx: usize) {
+    app.close_plugin_gui(track_idx, effect_idx);
     let result = if let Ok(mut ts) = app.engine.tracks.lock() {
         let effect_id = ts.get(track_idx).and_then(|t| t.fx_chain.get(effect_idx)).map(|inst| inst.id);
         let serialized = ts.get(track_idx).and_then(|t| {
@@ -133,7 +142,7 @@ fn remove_effect(app: &mut HdawApp, track_idx: usize, effect_idx: usize) {
                 track.automation_lanes.retain(|l| l.effect_instance_id != Some(eid));
             }
         }
-        app.undo_state.push(crate::app::undo::UndoCommand::RemoveEffect {
+        app.undo_service.push(crate::app::undo::UndoCommand::RemoveEffect {
             track_index: track_idx,
             effect_index: effect_idx,
             serialized: s,
@@ -157,7 +166,7 @@ fn add_builtin_effect(app: &mut HdawApp, track_idx: usize, name: &str, etype: Ef
         let idx = effect_index.min(track.fx_chain.len());
         track.fx_chain.insert(idx, serialized.clone());
     }
-    app.undo_state.push(crate::app::undo::UndoCommand::AddEffect {
+    app.undo_service.push(crate::app::undo::UndoCommand::AddEffect {
         track_index: track_idx,
         effect_index,
         serialized,
@@ -191,7 +200,7 @@ fn add_clap_effect(app: &mut HdawApp, track_idx: usize, desc: &crate::audio::cla
         let idx = effect_index.min(track.fx_chain.len());
         track.fx_chain.insert(idx, serialized.clone());
     }
-    app.undo_state.push(crate::app::undo::UndoCommand::AddEffect {
+    app.undo_service.push(crate::app::undo::UndoCommand::AddEffect {
         track_index: track_idx,
         effect_index,
         serialized,
@@ -214,7 +223,7 @@ pub fn render(ctx: &Context, app: &mut HdawApp) {
     let track_idx = match app.effect_editor_state.selected_track.or(app.selected_track) {
         Some(t) if t < app.track_ui.len() => t,
         _ => {
-            SidePanel::right("effect_editor")
+            let panel_res = SidePanel::right("effect_editor")
                 .resizable(true)
                 .default_width(app.preferences.effect_panel_width)
                 .min_width(200.0)
@@ -230,6 +239,7 @@ pub fn render(ctx: &Context, app: &mut HdawApp) {
                     ui.separator();
                     ui.colored_label(Color32::from_gray(120), "No track selected.\nClick a track header to begin.");
                 });
+            app.preferences.effect_panel_width = panel_res.response.rect.width();
             return;
         }
     };
@@ -237,7 +247,8 @@ pub fn render(ctx: &Context, app: &mut HdawApp) {
     if app.effect_editor_state.show_add_menu {
         egui::Window::new("Select Effect")
             .collapsible(false)
-            .resizable(false)
+            .resizable(true)
+            .default_width(400.0)
             .anchor(egui::Align2::CENTER_CENTER, (0.0, 0.0))
             .show(ctx, |ui| {
                 ui.label("Built-in");
@@ -250,18 +261,21 @@ pub fn render(ctx: &Context, app: &mut HdawApp) {
                 if !app.plugin_registry.is_empty() {
                     ui.separator();
                     ui.label("CLAP Plugins");
-                    let descriptors = app.plugin_registry.clone();
-                    for desc in &descriptors {
-                        let label = if desc.is_instrument {
-                            format!("{} [instrument]", desc.name)
-                        } else {
-                            desc.name.clone()
-                        };
-                        if ui.button(label).clicked() {
-                            add_clap_effect(app, track_idx, desc);
-                            app.effect_editor_state.show_add_menu = false;
+                    ui.horizontal_wrapped(|ui| {
+                        ui.set_min_height(24.0);
+                        let descriptors = app.plugin_registry.clone();
+                        for desc in &descriptors {
+                            let label = if desc.is_instrument {
+                                truncate(&format!("{} [instrument]", desc.name), 40)
+                            } else {
+                                truncate(&desc.name, 35)
+                            };
+                            if ui.button(label).clicked() {
+                                add_clap_effect(app, track_idx, desc);
+                                app.effect_editor_state.show_add_menu = false;
+                            }
                         }
-                    }
+                    });
                 }
                 ui.separator();
                 if ui.button("Cancel").clicked() {
@@ -276,7 +290,7 @@ pub fn render(ctx: &Context, app: &mut HdawApp) {
     let mut selected = app.effect_editor_state.selected_effect;
     let mut dirty = false;
 
-    SidePanel::right("effect_editor")
+    let panel_res = SidePanel::right("effect_editor")
         .resizable(true)
         .default_width(app.preferences.effect_panel_width)
         .min_width(200.0)
@@ -289,16 +303,21 @@ pub fn render(ctx: &Context, app: &mut HdawApp) {
                     }
                 });
             });
-            ui.label(format!("Track: {track_name}"));
+            ui.label(egui::RichText::new(format!("Track: {track_name}")).weak());
             ui.separator();
 
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 for (ei, fx) in fx_data.iter().enumerate() {
                     let is_selected = selected == Some(ei);
                     let cc = if fx.bypass { Color32::from_gray(60) }
                     else if is_selected { Color32::from_rgb(0x3a, 0x6a, 0xaa) }
                     else { Color32::from_rgb(0x3a, 0x4a, 0x3a) };
-                    if ui.add(egui::Button::new(&fx.type_name).fill(cc).min_size(Vec2::new(60.0, 24.0))).clicked() {
+                    
+                    let btn = egui::Button::new(&fx.type_name)
+                        .fill(cc)
+                        .min_size(Vec2::new(60.0, 24.0));
+                    
+                    if ui.add_sized([80.0, 24.0], btn).clicked() {
                         selected = Some(ei);
                     }
                 }
@@ -321,12 +340,44 @@ pub fn render(ctx: &Context, app: &mut HdawApp) {
 
             if let Some(fx) = fx_data.get(ei) {
                 ui.horizontal(|ui| {
-                    ui.label(&fx.type_name);
+                    ui.label(egui::RichText::new(&fx.type_name).strong());
                     let mut bp = fx.bypass;
                     if ui.checkbox(&mut bp, "Bypass").changed() {
                         write_bypass(app, track_idx, ei, bp);
                         dirty = true;
                         return;
+                    }
+
+                    if let EffectType::Clap { .. } = fx.etype {
+                        let has_gui = if let Ok(ts) = app.engine.tracks.lock() {
+                            ts.get(track_idx).and_then(|t| t.fx_chain.get(ei))
+                                .and_then(|inst| match &inst.kind {
+                                    crate::audio::effects::dsp_effect::EffectKind::Clap(a) => Some(a.try_lock().map(|l| l.gui_supported).unwrap_or(false)),
+                                    _ => None,
+                                }).unwrap_or(false)
+                        } else {
+                            false
+                        };
+
+                        if has_gui {
+                            let state = app.active_plugin_guis.get(&(track_idx, ei));
+                            let active = state.is_some();
+                            let is_separate = state.map_or(false, |s| s.separate);
+
+                            ui.horizontal(|ui| {
+                                let btn_cc = if active && !is_separate { Color32::from_rgb(0x3a, 0xaa, 0x6a) } else { Color32::from_gray(80) };
+                                if ui.add(egui::Button::new("GUI (Embedded)").fill(btn_cc)).clicked() {
+                                    app.toggle_plugin_gui(track_idx, ei, false);
+                                    dirty = true;
+                                }
+
+                                let btn_sep_cc = if active && is_separate { Color32::from_rgb(0x3a, 0xaa, 0x6a) } else { Color32::from_gray(80) };
+                                if ui.add(egui::Button::new("GUI (Separate)").fill(btn_sep_cc)).clicked() {
+                                    app.toggle_plugin_gui(track_idx, ei, true);
+                                    dirty = true;
+                                }
+                            });
+                        }
                     }
                 });
 
@@ -403,6 +454,7 @@ pub fn render(ctx: &Context, app: &mut HdawApp) {
 
     app.effect_editor_state.selected_effect = selected;
     app.effect_editor_state.selected_track = Some(track_idx);
+    app.preferences.effect_panel_width = panel_res.response.rect.width();
     if dirty {
         ctx.request_repaint();
     }

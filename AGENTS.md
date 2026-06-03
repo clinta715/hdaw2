@@ -1,5 +1,58 @@
 # HDAW Architecture Guide for AI Agents
 
+## v0.6.0 Changes (MIDI Pipeline Fixes + UI Polish)
+
+### MIDI → CLAP → Audio Pipeline Bugs Fixed
+- **NoteOn offset 1 during seek** (`midi_dispatch.rs`): Both NoteOff and NoteOn were at offset 0 during seek. `EventBuffer::sort()` uses `sort_unstable_by_key`, which can reorder equal-key events. NoteOn is now at offset 1 so NoteOff(0) always comes first. **Critical**: any code that appends events to the same `EventBuffer` at the same offset risks reordering — always bump one event by 1 sample when ordering matters.
+- **Clip-end NoteOff never sent** (`midi_dispatch.rs`): When `clip_end == buf_end`, the condition `clip_end < buf_end` was false, so the clip-end NoteOff was skipped entirely. Changed to `clip_end <= buf_end` and offset to `clip_end.saturating_sub(1).saturating_sub(buf_start)` (last sample before clip_end). Verified via integration test — output decays to ~0.00001 after NoteOff vs ~0.118 without.
+- **Stop resets CLAP via `seek_occurred`** (`transport.rs`): `stop()` now sets `seek_occurred = true`. Without this, Play/Stop cycles left the CLAP plugin's internal voices ringing — new NoteOn events piled on top of old sustained notes, causing progressive CPU saturation after a few cycles. The fix leverages the existing seek path: next Play triggers `a.reset()` which kills all voices via the audio thread.
+
+### Note Drag/Delete Fixes
+- **`update_midi_note` no longer sorts** (`commands.rs`): Removing `sort_by_key(|n| n.start_frame)` from `update_midi_note`. The sort changed note indices mid-drag, causing `note_idx` in the drag target to point to the wrong note on subsequent frames. Note order in `Vec<MidiNote>` doesn't affect playback (MIDI dispatch iterates all, event buffer sorts by offset) or display (notes drawn individually).
+- **Right-click deletion uses `secondary_clicked()`** (`piano_roll.rs`): `response.clicked()` only fires for primary button clicks. The old `secondary_down()` check inside was dead code — the enclosing `if clicked()` never ran for right-clicks. Now uses `response.clicked_by(PointerButton::Secondary)` as a separate handler.
+
+### UI Quality of Life
+- **Unsaved changes prompt**: `UnsavedChangesAction` enum + `confirm_unsaved`/`pending_after_save`/`pending_open_path` fields on `HdawApp`. Intercepts New/Open/Close when `undo_service.can_undo()` is true. Centered dialog with Save / Don't Save / Cancel. On Save, saves then executes pending action. On Don't Save, clears undo stack first (prevents infinite re-prompt loop).
+- **Recent files list**: `recent_files: Vec<PathBuf>` in `PreferencesState` (persisted in `preferences.ron`). Dedup'd, capped at 10, shown in File → Recent Files submenu. "Clear Recent" option. Updated on every save/open.
+- **About dialog**: Help → About HDAW with credits: "Written by Clint Anderson (clinta@gmail.com) and DeepSeek, MiniMax, and GLM".
+- **Multi-column plugin lists**: Instrument/effect selection dialogs use `horizontal_wrapped` layout so long lists flow into multiple columns instead of one tall scrollable column. Windows are `resizable(true)` so users can widen them.
+- **Plugin name truncation**: Helper `truncate(s, max)` added to `app_ui.rs`, `effect_editor/mod.rs`, `timeline/mod.rs`. Cuts names >35 chars with `…` ellipsis (char-aware, not byte-indexed).
+- **Piano roll size from viewport**: Default size computed as 80% x 70% of `ctx.available_rect()`, with 400x300 floor. Adapts to any screen size/DPI. Toolbar uses `horizontal_wrapped` to prevent window expansion jitter.
+
+### GUI Hardcoded Sizes → Named Constants
+All magic numbers in UI code have been extracted to file-level `const` declarations:
+
+| Constant | Value | Files |
+|----------|-------|-------|
+| `BTN_SIZE` | `vec2(30.0, 24.0)` | toolbar.rs |
+| `RECORD_FONT_SIZE` | 14.0 | toolbar.rs |
+| `TIME_FONT_SIZE` | 16.0 | toolbar.rs |
+| `CHANNEL_WIDTH` | 70.0 | mixer_panel.rs |
+| `MIXER_MIN_HEIGHT` | 160.0 | mixer_panel.rs |
+| `NOTE_NAME_FONT_SIZE` | 9.0 | piano_roll.rs |
+| `LANE_LABEL_FONT_SIZE` | 9.0 | piano_roll.rs |
+| `CC_CIRCLE_RADIUS` | 3.0 | piano_roll.rs |
+| `CC_HIT_RADIUS` | 6.0 | piano_roll.rs |
+| `CLIP_LABEL_SIZE` | 10.0 | clips.rs |
+| `FADE_HANDLE_SIZE` | 10.0 | clips.rs |
+| `EDGE_HIT` | 6.0 | clips.rs |
+| `FADE_HIT_AREA` | 14.0 | clips.rs |
+| `BODY_FONT_SIZE` | 11.0 | track_headers.rs |
+| `SMALL_FONT_SIZE` | 9.0 | track_headers.rs |
+| `INFO_FONT_SIZE` | 8.5 | track_headers.rs |
+| `RULER_FONT_SIZE` | 10.0 | ruler.rs |
+| `MARKER_FONT_SIZE` | 9.0 | ruler.rs |
+| `GRAPH_HEIGHT` | 120.0 | eq_graph.rs |
+| `GRAPH_MARGIN` | 8.0 | eq_graph.rs |
+| `LABEL_FONT_SIZE` | 8.0 | eq_graph.rs |
+| `NUM_SAMPLE_POINTS` | 200 | eq_graph.rs |
+| `FREQ_LABEL_WIDTH` | 30.0 | eq_graph.rs |
+
+All values are in egui logical pixels (DPI-scaled automatically). The change is purely about maintainability — every magic number is now findable, adjustable, and documented.
+
+### Integration Tests
+- New `tests/midi_pipeline_test.rs`: 4 tests exercising the full MIDI→CLAP→audio pipeline with a real CLAP instrument (Dexed FM synth). Tests: basic audio output, seek retrigger, clip-boundary NoteOff, and clip-end-aligned-with-buffer-boundary (regression test for the clip-end NoteOff bug). Run with `cargo test --test midi_pipeline_test -- --test-threads=1`.
+
 ## Core Architecture
 
 ### Dual-Model Sync (Critical Architectural Debt)
@@ -43,9 +96,9 @@ Two parallel data models must be manually kept in sync:
 - `Transport.playing: AtomicBool` — play/pause/stop via `play()`, `pause()`, `stop()`
 - **Play** sets `playing=true`
 - **Pause** sets `playing=false` (preserves position)
-- **Stop** sets `playing=false` AND resets position to 0
+- **Stop** sets `playing=false` AND resets position to 0 AND sets `seek_occurred=true`. The seek flag triggers `a.reset()` on the next Play (kills all CLAP plugin voices). Without this, Play/Stop cycles caused progressive note accumulation in the plugin.
 - `loop_region: AtomicU64` — packed as (loop_out << 32) | loop_in to avoid torn reads
-- `seek_occurred: AtomicBool` — set by `seek_to_frame()`, cleared once per audio callback via `swap(false, Acquire)`. Triggers NoteOff for all active notes to prevent stuck notes on seek.
+- `seek_occurred: AtomicBool` — set by `seek_to_frame()` and `stop()`, cleared once per audio callback via `swap(false, Acquire)`. Triggers NoteOff for all active notes + CLAP reset on next buffer.
 - UI triggers via `play_requested`, `pause_requested`, `stop_requested` flags
 
 ### Automation Architecture
@@ -102,8 +155,8 @@ Two parallel data models must be manually kept in sync:
 - **Sync**: `add_midi_note` / `remove_midi_note` / `add_midi_clip` / `add_midi_cc_event` / `remove_midi_cc_event` in `commands.rs` update both project and engine models, push undo commands
 - **Event sorting**: MIDI events sorted by sample offset using `EventBuffer::sort()` which uses `sort_unstable_by_key` (no heap alloc). **Critical**: Unstable sort means NoteOn and NoteOff at the same offset can reorder. During seeks, NoteOff cleanup and NoteOn restart both land at offset 0 — NoteOn is deliberately bumped to offset 1 to prevent reordering.
 - **CLAP activation pattern**: `instance.activate(|_, _| (), config)` creates a no-op `AudioProcessor` handler (no audio-thread host callbacks). This is the **correct and documented pattern** from clack_host examples. Audio ports are registered independently at `process()` call time via `AudioPorts.with_input_buffers()` / `.with_output_buffers()`.
-- **`ensure_processing_started()`**: Called on first `process()`. If the plugin's C `start_processing()` returns false, this fails silently — the code now logs a `tracing::warn!`. This is a common failure point for misbehaving CLAP plugins.
-- **MIDI diagnostics**: Tracing at `tracing::debug!` level in `process_track()` (instrument detection, event count per buffer, output verification) and `clap_effect.rs` (plugin load with `has_note_input`, `ensure_processing_started` failures, zero-output warnings).
+- **`ensure_processing_started()`**: Called before every `process()` call. **Safe to call every buffer** — the clack_host implementation (`PluginAudioProcessor::ensure_processing_started()` at `process.rs:299-306`) returns `Ok(&mut StartedPluginAudioProcessor)` if already started, only calls C `start_processing()` on transition from Stopped. If the plugin's C `start_processing()` returns false, this fails silently.
+- **MIDI diagnostics**: Tracing at `tracing::debug!` level in `process_track()` (instrument detection, event count per buffer, output verification) and `clap_effect.rs` (plugin load with `has_note_input`, ensure_processing_started failures, zero-output warnings).
 - **NoteOn construction**: `NoteOnEvent::new(offset, pckn, vel)` where `vel = note.velocity as f64 / 127.0` (normalized 0.0–1.0). `Pckn::new(port, channel, key, note_id)` — note_id always 0 (fine as long as overlapping same-key notes don't occur).
 - **Default note length**: Configurable in piano roll toolbar (1/1, 1/2, 1/4, 1/8, 1/16, 1/32), stored in `PianoRollState.note_length`. Used for single-click note creation (not click-drag).
 - **Sample rate aware**: `ClipHandle::new_midi()` takes `sample_rate` param; `draw_midi` takes `sample_rate` for correct beat-to-frame conversion
@@ -203,6 +256,9 @@ These are `thread_local! RefCell<Vec<f32>>` (or `EventBuffer`) that grow on firs
 | | _New files added in v0.5.0_ | |
 | `project/cc_event.rs` | 12 | `CCEvent` struct for MIDI controller automation |
 | `ui/piano_roll_state.rs` | 34 | PianoRollState with controller lane config, CcDragState |
+| | | |
+| | _New files added in v0.6.0_ | |
+| `tests/midi_pipeline_test.rs` | 202 | Integration tests for MIDI→CLAP→audio pipeline |
 
 ## Common Patterns to Follow
 

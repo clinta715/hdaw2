@@ -75,6 +75,12 @@ pub struct PreferencesState {
     pub show_pool_on_start: bool,
     pub show_effect_editor_on_start: bool,
     pub effect_panel_width: f32,
+    pub mixer_panel_height: f32,
+    
+    // Playhead / Scrolling
+    pub follow_playhead: bool,
+    pub piano_roll_follow_playhead: bool,
+    pub center_playhead_on_zoom: bool,
     
     // Piano Roll Prefs
     pub piano_roll_row_height: f32,
@@ -88,6 +94,16 @@ pub struct PreferencesState {
     pub last_open_dir: Option<PathBuf>,
     #[serde(default)]
     pub last_save_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub recent_files: Vec<PathBuf>,
+}
+
+impl PreferencesState {
+    pub fn push_recent_file(&mut self, path: PathBuf) {
+        self.recent_files.retain(|p| p != &path);
+        self.recent_files.insert(0, path);
+        self.recent_files.truncate(10);
+    }
 }
 
 impl Default for PreferencesState {
@@ -111,6 +127,11 @@ impl Default for PreferencesState {
             show_pool_on_start: false,
             show_effect_editor_on_start: true,
             effect_panel_width: 280.0,
+            mixer_panel_height: 220.0,
+            
+            follow_playhead: true,
+            piano_roll_follow_playhead: true,
+            center_playhead_on_zoom: true,
             
             piano_roll_row_height: 14.0,
             piano_roll_min_note: 24, // C1
@@ -120,6 +141,7 @@ impl Default for PreferencesState {
             last_import_dir: None,
             last_open_dir: None,
             last_save_dir: None,
+            recent_files: Vec::new(),
         }
     }
 }
@@ -222,6 +244,15 @@ pub fn render(ctx: &Context, app: &mut HdawApp) {
 
             ui.add_space(8.0);
 
+            CollapsingHeader::new("Playhead & Scrolling")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.add_space(4.0);
+                    ui.checkbox(&mut app.preferences.follow_playhead, "Follow Playhead on Timeline");
+                    ui.checkbox(&mut app.preferences.piano_roll_follow_playhead, "Follow Playhead on Piano Roll");
+                    ui.checkbox(&mut app.preferences.center_playhead_on_zoom, "Center Zoom on Playhead");
+                });
+
             CollapsingHeader::new("Timeline / Snap / Grid")
                 .default_open(true)
                 .show(ui, |ui| {
@@ -277,6 +308,12 @@ pub fn render(ctx: &Context, app: &mut HdawApp) {
                         ui.add(egui::DragValue::new(&mut app.preferences.effect_panel_width)
                             .speed(5.0)
                             .range(150.0..=500.0));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Mixer Panel Height:");
+                        ui.add(egui::DragValue::new(&mut app.preferences.mixer_panel_height)
+                            .speed(5.0)
+                            .range(100.0..=600.0));
                     });
                 });
 

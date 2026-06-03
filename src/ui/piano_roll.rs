@@ -5,9 +5,12 @@ use crate::ui::piano_roll_state::{ControllerLane, PianoRollDragTarget};
 use egui::{pos2, vec2, Color32, Vec2};
 
 const VEL_LANE_HEIGHT: f32 = 60.0;
-
 const NOTE_NAME_WIDTH: f32 = 48.0;
-const NOTE_BAR_HEIGHT_RATIO: f32 = 0.8; 
+const NOTE_BAR_HEIGHT_RATIO: f32 = 0.8;
+const NOTE_NAME_FONT_SIZE: f32 = 9.0;
+const LANE_LABEL_FONT_SIZE: f32 = 9.0;
+const CC_CIRCLE_RADIUS: f32 = 3.0;
+const CC_HIT_RADIUS: f32 = 6.0;
 
 static NOTE_NAMES: &[&str; 12] = &["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
@@ -61,12 +64,15 @@ pub fn render(ctx: &egui::Context, app: &mut HdawApp) {
     let num_rows = (max_note.saturating_sub(min_note) as usize).max(1) + 1;
 
     let mut show = app.show_piano_roll;
+    let avail = ctx.available_rect();
+    let init_w = (avail.width() * 0.8).max(400.0);
+    let init_h = (avail.height() * 0.7).max(300.0);
     egui::Window::new(format!("Piano Roll - {}", clip.name))
         .id("piano_roll".into())
         .open(&mut show)
         .collapsible(false)
         .resizable(true)
-        .default_size(Vec2::new(800.0, 500.0))
+        .default_size(Vec2::new(init_w, init_h))
         .show(ctx, |ui| {
             // Handle scroll and zoom
             let mw_delta = ui.input(|i| i.raw_scroll_delta);
@@ -102,7 +108,7 @@ pub fn render(ctx: &egui::Context, app: &mut HdawApp) {
                 (0.25, "1/16"),
                 (0.125, "1/32"),
             ];
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Note:");
                 for &(val, label) in note_lengths {
                     let selected = (app.piano_roll_state.note_length - val).abs() < 0.001;
@@ -266,7 +272,7 @@ pub fn render(ctx: &egui::Context, app: &mut HdawApp) {
                         pos2(note_names_x + 4.0, y + row_height / 2.0),
                         egui::Align2::LEFT_CENTER,
                         note_to_name(note),
-                        egui::FontId::proportional(9.0),
+                        egui::FontId::proportional(NOTE_NAME_FONT_SIZE),
                         text_color,
                     );
                 }
@@ -448,7 +454,26 @@ pub fn render(ctx: &egui::Context, app: &mut HdawApp) {
                 }
             }
 
-            // Note creation / deletion
+            // Note deletion (right-click / secondary click)
+            if response.clicked_by(egui::PointerButton::Secondary) && !response.dragged() {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    let rel_x = pos.x - grid_x + app.piano_roll_state.scroll_x as f32;
+                    let rel_y = pos.y - origin.y + app.piano_roll_state.scroll_y as f32;
+                    let row = (rel_y / row_height) as usize;
+                    if row < num_rows {
+                        let pitch = max_note - row as u8;
+                        let rel_frame = (rel_x as f64 / pps * sr as f64) as u64;
+                        let hit_idx = clip.notes.iter().position(|n| {
+                            n.pitch == pitch && rel_frame >= n.start_frame && rel_frame < n.start_frame + n.duration
+                        });
+                        if let Some(idx) = hit_idx {
+                            app.remove_midi_note(track_idx, clip_id, idx);
+                        }
+                    }
+                }
+            }
+
+            // Note creation (primary click on empty space)
             if response.clicked() && !response.dragged() {
                 if let Some(pos) = response.interact_pointer_pos() {
                     let rel_x = pos.x - grid_x + app.piano_roll_state.scroll_x as f32;
@@ -458,15 +483,11 @@ pub fn render(ctx: &egui::Context, app: &mut HdawApp) {
                         let pitch = max_note - row as u8;
                         let rel_frame = (rel_x as f64 / pps * sr as f64) as u64;
 
-                        let hit_idx = clip.notes.iter().position(|n| {
+                        let hit = clip.notes.iter().any(|n| {
                             n.pitch == pitch && rel_frame >= n.start_frame && rel_frame < n.start_frame + n.duration
                         });
 
-                        if ui.input(|i| i.pointer.secondary_down()) {
-                            if let Some(idx) = hit_idx {
-                                app.remove_midi_note(track_idx, clip_id, idx);
-                            }
-                        } else if hit_idx.is_none() {
+                        if !hit {
                             let snapped_start = app.timeline_state.snap_frames_to_grid(rel_frame, sr, bpm, &app.preferences, &app.project.markers);
                             let frames_per_beat = (sr as f64 / bps).round() as u64;
                             let dur = (app.piano_roll_state.note_length * frames_per_beat as f64).round() as u64;
@@ -514,7 +535,7 @@ pub fn render(ctx: &egui::Context, app: &mut HdawApp) {
                             pos2(vel_rect.left() + 4.0, vel_rect.top() + 2.0),
                             egui::Align2::LEFT_TOP,
                             lane_label,
-                            egui::FontId::proportional(9.0),
+                            egui::FontId::proportional(LANE_LABEL_FONT_SIZE),
                             Color32::from_gray(140),
                         );
 
@@ -616,7 +637,7 @@ pub fn render(ctx: &egui::Context, app: &mut HdawApp) {
                             pos2(cc_rect.left() + 4.0, cc_rect.top() + 2.0),
                             egui::Align2::LEFT_TOP,
                             cc_label,
-                            egui::FontId::proportional(9.0),
+                            egui::FontId::proportional(LANE_LABEL_FONT_SIZE),
                             Color32::from_gray(140),
                         );
 
@@ -651,12 +672,12 @@ pub fn render(ctx: &egui::Context, app: &mut HdawApp) {
                             }
                             prev_screen = Some(pt);
 
-                            cc_painter.circle_filled(pt, 3.0, cc_color);
-                            cc_painter.circle_stroke(pt, 3.0, egui::Stroke::new(1.0, Color32::from_gray(200)));
+                            cc_painter.circle_filled(pt, CC_CIRCLE_RADIUS, cc_color);
+                            cc_painter.circle_stroke(pt, CC_CIRCLE_RADIUS, egui::Stroke::new(1.0, Color32::from_gray(200)));
                         }
 
                         // CC point editing
-                        let hit_radius = 6.0f32;
+                        let hit_radius = CC_HIT_RADIUS;
                         let find_cc_point = |pos: egui::Pos2| -> Option<usize> {
                             filtered.iter().position(|e| {
                                 let x = cc_content_left + (e.time_frames as f64 / sr as f64 * pps) as f32

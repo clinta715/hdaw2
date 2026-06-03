@@ -92,7 +92,7 @@ pub fn handle_automation_interaction(response: &Response, rect: &Rect, app: &mut
                         ((rel_x as f64 + scroll_x) / pps * sr_f) as u64, sr, bpm, &app.preferences, &app.project.markers);
                     if let Some(lane) = handle.automation_lanes.get_mut(li) {
                         if let Some(pt) = automation::add_point_to_lane(lane, time_frames, value) {
-                            app.undo_state.push(crate::app::undo::UndoCommand::AutomationAddPoint {
+                            app.undo_service.push(crate::app::undo::UndoCommand::AutomationAddPoint {
                                 track_index: track_idx,
                                 lane_index: li,
                                 point: pt,
@@ -111,7 +111,7 @@ pub fn handle_automation_interaction(response: &Response, rect: &Rect, app: &mut
                 if let Some(handle) = tracks.get(track_idx) {
                     if let Some(lane) = handle.automation_lanes.get(ad.lane_index) {
                         if let Some(pt) = lane.points.get(ad.point_index) {
-                            app.undo_state.push(crate::app::undo::UndoCommand::AutomationMovePoint {
+                            app.undo_service.push(crate::app::undo::UndoCommand::AutomationMovePoint {
                                 track_index: track_idx,
                                 lane_index: ad.lane_index,
                                 point_index: ad.point_index,
@@ -137,7 +137,7 @@ pub fn handle_automation_interaction(response: &Response, rect: &Rect, app: &mut
                     if let Some(lane) = handle.automation_lanes.get_mut(li) {
                         automation::remove_point(lane, pi);
                     }
-                    app.undo_state.push(crate::app::undo::UndoCommand::AutomationRemovePoint {
+                    app.undo_service.push(crate::app::undo::UndoCommand::AutomationRemovePoint {
                         track_index: track_idx,
                         lane_index: li,
                         point_index: pi,

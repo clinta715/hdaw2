@@ -6,6 +6,39 @@ use crate::ui::timeline::{DragMode, LoopDragState, LoopHandle, RULER_HEIGHT};
 use egui::{pos2, vec2, Rect, Response, Ui};
 use std::sync::atomic::Ordering;
 
+fn find_clip_pos(track: &crate::project::track::Track, clip_id: uuid::Uuid) -> Option<&u64> {
+    for c in &track.clips {
+        match c {
+            ClipKind::Audio(a) if a.id == clip_id => return Some(&a.position_frames),
+            ClipKind::Midi(m) if m.id == clip_id => return Some(&m.position_frames),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn find_clip_pos_mut(track: &mut crate::project::track::Track, clip_id: uuid::Uuid) -> Option<&mut u64> {
+    for c in track.clips.iter_mut() {
+        match c {
+            ClipKind::Audio(a) if a.id == clip_id => return Some(&mut a.position_frames),
+            ClipKind::Midi(m) if m.id == clip_id => return Some(&mut m.position_frames),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn find_audio_clip_for_fade(track: &crate::project::track::Track, clip_id: uuid::Uuid) -> Option<(&u64, &u64)> {
+    for c in &track.clips {
+        if let ClipKind::Audio(a) = c {
+            if a.id == clip_id {
+                return Some((&a.fade_in_frames, &a.fade_out_frames));
+            }
+        }
+    }
+    None
+}
+
 pub fn handle_drag_end_snap(response: &Response, app: &mut HdawApp) {
     if response.drag_stopped() {
         if let Some(drag) = app.timeline_state.drag_state.take() {
@@ -18,9 +51,9 @@ pub fn handle_drag_end_snap(response: &Response, app: &mut HdawApp) {
             match drag.mode {
                 DragMode::FadeIn | DragMode::FadeOut => {
                     if let Some(track) = app.project.tracks.get(drag.track_index) {
-                        if let Some(ClipKind::Audio(clip)) = track.clips.iter().find(|c| matches!(c, ClipKind::Audio(a) if a.id == drag.clip_id)) {
-                            let new_fi = clip.fade_in_frames;
-                            let new_fo = clip.fade_out_frames;
+                        if let Some((fi, fo)) = find_audio_clip_for_fade(track, drag.clip_id) {
+                            let new_fi = *fi;
+                            let new_fo = *fo;
                             if old_fi != new_fi || old_fo != new_fo {
                                 app.undo_service.push(crate::app::undo::UndoCommand::FadeClip {
                                     track_index: drag.track_index,
@@ -42,28 +75,34 @@ pub fn handle_drag_end_snap(response: &Response, app: &mut HdawApp) {
                 let sr = app.engine.transport.sample_rate();
                 let bpm = app.project.bpm;
                 if let Some(track) = app.project.tracks.get_mut(drag.track_index) {
-                    if let Some(ClipKind::Audio(clip)) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Audio(a) if a.id == drag.clip_id)) {
-                        let snapped = app.timeline_state.snap_frames_to_grid(clip.position_frames, sr, bpm, &app.preferences, &app.project.markers);
-                        let delta = snapped as i64 - clip.position_frames as i64;
+                    if let Some(pos_ref) = find_clip_pos_mut(track, drag.clip_id) {
+                        let snapped = app.timeline_state.snap_frames_to_grid(*pos_ref, sr, bpm, &app.preferences, &app.project.markers);
+                        let delta = snapped as i64 - *pos_ref as i64;
                         if delta != 0 {
-                            clip.position_frames = snapped;
+                            let new_pos = (*pos_ref as i64 + delta).max(0) as u64;
+                            *pos_ref = new_pos;
                             if let Ok(tracks) = app.engine.tracks.lock() {
                                 if let Some(handle) = tracks.get(drag.track_index) {
                                     if let Some(ch) = handle.clips.iter().find(|c| c.clip_id == drag.clip_id) {
-                                        let old_p = ch.position_frames.load(Ordering::Acquire);
-                                        ch.position_frames.store((old_p as i64 + delta).max(0) as u64, Ordering::Release);
+                                        ch.position_frames.store(new_pos, Ordering::Release);
                                     }
                                 }
+                            }
+                            if old_pos != new_pos {
+                                app.undo_service.push(crate::app::undo::UndoCommand::MoveClip {
+                                    track_index: drag.track_index,
+                                    clip_id: drag.clip_id,
+                                    old_position: old_pos,
+                                    new_position: new_pos,
+                                });
                             }
                         }
                     }
                 }
             } else {
                 if let Some(track) = app.project.tracks.get(drag.track_index) {
-                    if let Some(ClipKind::Audio(clip)) = track.clips.iter().find(|c| matches!(c, ClipKind::Audio(a) if a.id == drag.clip_id)) {
-                        let new_pos = clip.position_frames;
-                        let new_off = clip.offset_frames;
-                        let new_len = clip.length_frames;
+                    if let Some(pos_ref) = find_clip_pos(track, drag.clip_id) {
+                        let new_pos = *pos_ref;
                         match drag.mode {
                             DragMode::Move => {
                                 if old_pos != new_pos {
@@ -76,15 +115,17 @@ pub fn handle_drag_end_snap(response: &Response, app: &mut HdawApp) {
                                 }
                             }
                             _ => {
-                                if old_off != new_off || old_len != new_len {
-                                    app.undo_service.push(crate::app::undo::UndoCommand::TrimClip {
-                                        track_index: drag.track_index,
-                                        clip_id: drag.clip_id,
-                                        old_offset: old_off,
-                                        old_length: old_len,
-                                        new_offset: new_off,
-                                        new_length: new_len,
-                                    });
+                                if let Some(ClipKind::Audio(clip)) = track.clips.iter().find(|c| matches!(c, ClipKind::Audio(a) if a.id == drag.clip_id)) {
+                                    if old_off != clip.offset_frames || old_len != clip.length_frames {
+                                        app.undo_service.push(crate::app::undo::UndoCommand::TrimClip {
+                                            track_index: drag.track_index,
+                                            clip_id: drag.clip_id,
+                                            old_offset: old_off,
+                                            old_length: old_len,
+                                            new_offset: clip.offset_frames,
+                                            new_length: clip.length_frames,
+                                        });
+                                    }
                                 }
                             }
                         }

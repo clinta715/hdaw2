@@ -1,4 +1,5 @@
 pub mod waveform;
+pub mod native_window;
 
 pub fn load_wav_file(path: &str) -> Result<(Vec<f32>, u16, u32), String> {
     let reader = hound::WavReader::open(path).map_err(|e| format!("failed to open: {e}"))?;

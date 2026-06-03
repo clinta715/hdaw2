@@ -15,6 +15,13 @@ use crate::project::clip::{AudioClip, ClipKind};
 use crate::project::clip_handle::ClipHandle;
 use crate::project::pool::PoolClip;
 use crate::project::Project;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum UnsavedChangesAction {
+    NewProject,
+    OpenProject,
+    CloseApp,
+}
 use crate::ui::audio_pool::AudioPoolPanelState;
 use crate::ui::effect_editor::EffectEditorState;
 use crate::ui::mixer_panel::MixerPanelState;
@@ -35,6 +42,8 @@ use uuid::Uuid;
 pub struct PluginGuiState {
     pub is_open: bool,
     pub initialized: bool,
+    pub separate: bool,
+    pub container_hwnd: Option<*mut std::ffi::c_void>,
 }
 
 #[derive(Clone)]
@@ -100,10 +109,14 @@ pub struct HdawApp {
     pub current_path: Option<PathBuf>,
     pub error_message: Option<String>,
     pub show_instrument_dialog: bool,
+    pub show_about: bool,
     pub show_piano_roll: bool,
     pub piano_roll_state: PianoRollState,
     pub editing_midi_clip_id: Option<Uuid>,
     pub undo_service: UndoService,
+    pub confirm_unsaved: Option<UnsavedChangesAction>,
+    pub pending_after_save: Option<UnsavedChangesAction>,
+    pub pending_open_path: Option<std::path::PathBuf>,
     pub preferences: PreferencesState,
     pub panel_manager: PanelManager,
     pub plugin_registry: Vec<PluginDescriptor>,
@@ -162,10 +175,14 @@ impl HdawApp {
             current_path: None,
             error_message: None,
             show_instrument_dialog: false,
+            show_about: false,
             show_piano_roll: false,
             piano_roll_state: PianoRollState::default(),
             editing_midi_clip_id: None,
             undo_service: UndoService::new(),
+            confirm_unsaved: None,
+            pending_after_save: None,
+            pending_open_path: None,
             preferences: prefs_io::load_preferences().unwrap_or_default(),
             panel_manager: PanelManager::new(),
             plugin_registry: Vec::new(),
@@ -270,9 +287,9 @@ impl HdawApp {
         self.plugin_registry = crate::audio::clap_scanner::scan_plugins();
     }
 
-    pub fn toggle_plugin_gui(&mut self, track_idx: usize, effect_idx: usize) {
-        if self.active_plugin_guis.contains_key(&(track_idx, effect_idx)) {
-            // Close GUI
+    pub fn close_plugin_gui(&mut self, track_idx: usize, effect_idx: usize) {
+        if let Some(state) = self.active_plugin_guis.remove(&(track_idx, effect_idx)) {
+            // 1. Close CLAP GUI first
             if let Ok(mut ts) = self.engine.tracks.lock() {
                 if let Some(t) = ts.get_mut(track_idx) {
                     if let Some(inst) = t.fx_chain.get_mut(effect_idx) {
@@ -284,9 +301,38 @@ impl HdawApp {
                     }
                 }
             }
-            self.active_plugin_guis.remove(&(track_idx, effect_idx));
+            // 2. Destroy container HWND second
+            if let Some(hwnd) = state.container_hwnd {
+                unsafe {
+                    if windows_sys::Win32::UI::WindowsAndMessaging::IsWindow(hwnd as _) != 0 {
+                        windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd as _);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn toggle_plugin_gui(&mut self, track_idx: usize, effect_idx: usize, separate: bool) {
+        if let Some(state) = self.active_plugin_guis.get(&(track_idx, effect_idx)) {
+            let was_separate = state.separate;
+            self.close_plugin_gui(track_idx, effect_idx);
+
+            // If we're toggling to a different mode, re-open immediately
+            if was_separate != separate {
+                self.active_plugin_guis.insert((track_idx, effect_idx), PluginGuiState { is_open: true, initialized: false, separate, container_hwnd: None });
+            }
         } else {
-            self.active_plugin_guis.insert((track_idx, effect_idx), PluginGuiState { is_open: true, initialized: false });
+            self.active_plugin_guis.insert((track_idx, effect_idx), PluginGuiState { is_open: true, initialized: false, separate, container_hwnd: None });
+        }
+    }
+}
+
+impl Drop for HdawApp {
+    fn drop(&mut self) {
+        self.engine.shutdown();
+        let entries: Vec<(usize, usize)> = self.active_plugin_guis.keys().copied().collect();
+        for (track_idx, effect_idx) in entries {
+            self.close_plugin_gui(track_idx, effect_idx);
         }
     }
 }
@@ -340,18 +386,52 @@ impl HdawApp {
         let entries: Vec<(usize, usize)> = self.active_plugin_guis.keys().copied().collect();
 
         for (track_idx, effect_idx) in entries {
-            let initialized = self.active_plugin_guis
+            let (initialized, separate, container_hwnd) = self.active_plugin_guis
                 .get(&(track_idx, effect_idx))
-                .map_or(true, |s| s.initialized);
+                .map_or((true, false, None), |s| (s.initialized, s.separate, s.container_hwnd));
+
+            if initialized && container_hwnd.is_some() {
+                unsafe {
+                    if windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible(container_hwnd.unwrap() as _) == 0 {
+                        // Window was hidden (probably by user clicking X)
+                        self.close_plugin_gui(track_idx, effect_idx);
+                        continue;
+                    }
+                }
+            }
 
             if !initialized {
-                if let Some(hwnd) = main_hwnd {
+                let mut plugin_name = format!("Plugin {}-{}", track_idx, effect_idx);
+                if let Ok(ts) = self.engine.tracks.lock() {
+                    if let Some(t) = ts.get(track_idx) {
+                        if let Some(inst) = t.fx_chain.get(effect_idx) {
+                            plugin_name = inst.name.clone();
+                        }
+                    }
+                }
+
+                let parent_hwnd_for_container = if separate {
+                    std::ptr::null_mut()
+                } else {
+                    match main_hwnd {
+                        Some(h) => h,
+                        None => continue,
+                    }
+                };
+
+                let container = crate::utils::native_window::NativeWindow::new(
+                    &plugin_name,
+                    800, 600,
+                    parent_hwnd_for_container as _
+                );
+
+                if let Ok(win) = container {
                     if let Ok(mut ts) = self.engine.tracks.lock() {
                         if let Some(t) = ts.get_mut(track_idx) {
                             if let Some(inst) = t.fx_chain.get_mut(effect_idx) {
                                 if let EffectKind::Clap(adapter) = &inst.kind {
                                     if let Ok(mut a) = adapter.lock() {
-                                        match a.open_gui(hwnd) {
+                                        match a.open_gui(win.hwnd as _) {
                                             Ok(()) => {
                                                 let _ = a.show_gui();
                                             }
@@ -364,9 +444,10 @@ impl HdawApp {
                             }
                         }
                     }
-                }
-                if let Some(state) = self.active_plugin_guis.get_mut(&(track_idx, effect_idx)) {
-                    state.initialized = true;
+                    if let Some(state) = self.active_plugin_guis.get_mut(&(track_idx, effect_idx)) {
+                        state.initialized = true;
+                        state.container_hwnd = Some(win.hwnd as _);
+                    }
                 }
             }
         }

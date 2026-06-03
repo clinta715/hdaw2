@@ -1,6 +1,10 @@
 use egui::{pos2, vec2, Color32, Pos2, Rect, Stroke};
 use std::sync::atomic::Ordering;
 
+const BODY_FONT_SIZE: f32 = 11.0;
+const SMALL_FONT_SIZE: f32 = 9.0;
+const INFO_FONT_SIZE: f32 = 8.5;
+
 #[derive(Clone, Default)]
 pub struct TrackFxInfo {
     pub instrument_name: Option<String>,
@@ -33,8 +37,8 @@ pub fn draw(
     painter.rect_filled(color_strip, 0.0, strip_color);
 
     let text_x = rect.left() + 10.0;
-    let body_font = egui::FontId::proportional(11.0);
-    let small_font = egui::FontId::proportional(9.0);
+    let body_font = egui::FontId::proportional(BODY_FONT_SIZE);
+    let small_font = egui::FontId::proportional(SMALL_FONT_SIZE);
 
     // Track Name
     painter.text(
@@ -124,7 +128,7 @@ pub fn draw(
     }
 
     let info_y = rect.top() + 68.0;
-    let info_font = egui::FontId::proportional(8.5);
+    let info_font = egui::FontId::proportional(INFO_FONT_SIZE);
     let info_max_x = rect.right() - 22.0;
 
     if let Some(ref inst) = fx_info.instrument_name {
