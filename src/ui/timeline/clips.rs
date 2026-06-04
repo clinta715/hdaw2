@@ -166,6 +166,27 @@ fn draw_audio(
         painter.rect_filled(fade_rect, CLIP_CORNER_RADIUS, Color32::from_black_alpha(40));
     }
 
+    // Draw gain envelope overlay
+    if !clip.gain_points.is_empty() && available_w > 20.0 {
+        let clip_start_px = left_pixel;
+        let clip_len_f = clip.length_frames;
+        let env_color = Color32::from_rgb(0x42, 0xa5, 0xf5);
+        let mut pts: Vec<Pos2> = Vec::new();
+        for gp in &clip.gain_points {
+            let x = clip_start_px + (gp.time_frames as f64 / clip_len_f as f64 * available_w as f64) as f32;
+            let y = clip_rect.bottom() - gp.value * height;
+            pts.push(pos2(x, y));
+        }
+        if pts.len() >= 2 {
+            for w in pts.windows(2) {
+                painter.line_segment([w[0], w[1]], Stroke::new(1.5, env_color));
+            }
+        }
+        for &pt in &pts {
+            painter.circle_filled(pt, 2.5, env_color);
+        }
+    }
+
     if available_w > 40.0 {
         let small_font = egui::FontId::proportional(CLIP_LABEL_SIZE);
         painter.text(
@@ -331,6 +352,82 @@ pub fn handle_interaction(
     let pps = app.timeline_state.pixels_per_second;
     let scroll = app.timeline_state.scroll_x;
 
+    // Handle ongoing drag (before track iteration) — allows cross-track movement
+    if response.dragged() {
+        if let Some(ref drag) = app.timeline_state.drag_state.clone() {
+            let delta_x = pos.x as f64 - drag.drag_start_x;
+            let delta_frames = (delta_x / pps * sr_f) as i64;
+            match drag.mode {
+                DragMode::Move => {
+                    let mut new_pos = (drag.original_position_frames as i64 + delta_frames)
+                        .max(0) as u64;
+                    if app.timeline_state.snap_enabled {
+                        let sr = app.engine.transport.sample_rate();
+                        let bpm = app.project.bpm;
+                        new_pos = app.timeline_state.snap_frames_to_grid(new_pos, sr, bpm, &app.preferences, &app.project.markers);
+                    }
+                    app.update_clip_position(drag.track_index, drag.clip_id, new_pos);
+                    // Update target track based on mouse Y
+                    let new_ti = ((pos.y - rect.top() - RULER_HEIGHT - app.timeline_state.scroll_y as f32) / track_height)
+                        .floor() as i32;
+                    if new_ti >= 0 && (new_ti as usize) < app.project.tracks.len() {
+                        let new_ti = new_ti as usize;
+                        if let Some(d) = app.timeline_state.drag_state.as_mut() {
+                            d.track_index = new_ti;
+                        }
+                    }
+                }
+                DragMode::TrimLeft => {
+                    let new_off = (drag.original_offset_frames as i64 + delta_frames).max(0) as u64;
+                    let new_len = drag.original_length_frames.saturating_sub(
+                        (delta_frames.max(0) as u64).min(drag.original_length_frames),
+                    );
+                    app.update_clip_trim(drag.track_index, drag.clip_id, None, Some(new_off), Some(new_len));
+                }
+                DragMode::TrimRight => {
+                    let new_len = (drag.original_length_frames as i64 + delta_frames).max(1) as u64;
+                    app.update_clip_trim(drag.track_index, drag.clip_id, None, None, Some(new_len));
+                }
+                DragMode::FadeIn => {
+                    let new_fade = (drag.original_fade_in as i64 + delta_frames).max(0) as u64;
+                    app.update_clip_fade(drag.track_index, drag.clip_id, Some(new_fade), None);
+                }
+                DragMode::FadeOut => {
+                    let new_fade = (drag.original_fade_out as i64 - delta_frames).max(0) as u64;
+                    app.update_clip_fade(drag.track_index, drag.clip_id, None, Some(new_fade));
+                }
+            }
+            return;
+        }
+    }
+
+    // Seam-click detection: glue two adjacent clips
+    if response.clicked_by(egui::PointerButton::Primary) && !response.dragged() {
+        for (track_idx, track) in app.project.tracks.iter().enumerate() {
+            let track_y = rect.top() + RULER_HEIGHT + track_idx as f32 * track_height
+                + app.timeline_state.scroll_y as f32;
+            if pos.y < track_y || pos.y > track_y + track_height { continue; }
+            // Collect clip bounds sorted by position
+            let mut bounds: Vec<(uuid::Uuid, f64, f64)> = track.clips.iter().filter_map(|c| match c {
+                crate::project::clip::ClipKind::Audio(a) => Some((a.id, a.position_frames as f64, a.length_frames as f64)),
+                crate::project::clip::ClipKind::Midi(m) => Some((m.id, m.position_frames as f64, m.length_frames as f64)),
+            }).collect();
+            bounds.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            let hit_px = 6.0; // pixel tolerance for seam hit
+            for pair in bounds.windows(2) {
+                let (id_a, pos_a, len_a) = pair[0];
+                let (id_b, pos_b, _len_b) = pair[1];
+                let seam_frame = pos_a + len_a;
+                if seam_frame != pos_b { continue; } // only glue truly adjacent clips
+                let seam_x = (rect.left() + header_width) as f64 + (seam_frame / sr_f * pps - scroll);
+                if (pos.x as f64 - seam_x).abs() <= hit_px as f64 {
+                    app.glue_clips(track_idx, id_a, id_b);
+                    return;
+                }
+            }
+        }
+    }
+
     for (track_idx, track) in app.project.tracks.iter().enumerate() {
         let track_y = rect.top() + RULER_HEIGHT + track_idx as f32 * track_height
             + app.timeline_state.scroll_y as f32;
@@ -359,49 +456,6 @@ pub fn handle_interaction(
             if pos.x as f64 >= left_pixel && pos.x as f64 <= right_pixel {
                 hit_clip = true;
 
-                if response.dragged() && app.timeline_state.drag_state.is_some() {
-                    if let Some(ref drag) = app.timeline_state.drag_state {
-                        if drag.clip_id == clip_id {
-                            let delta_x = pos.x as f64 - drag.drag_start_x;
-                            let delta_frames = (delta_x / pps * sr_f) as i64;
-                            match drag.mode {
-                                DragMode::Move => {
-                                    let mut new_pos = (drag.original_position_frames as i64 + delta_frames)
-                                        .max(0) as u64;
-                                    if app.timeline_state.snap_enabled {
-                                        let sr = app.engine.transport.sample_rate();
-                                        let bpm = app.project.bpm;
-                                        new_pos = app.timeline_state.snap_frames_to_grid(new_pos, sr, bpm, &app.preferences, &app.project.markers);
-                                    }
-                                    app.update_clip_position(track_idx, clip_id, new_pos);
-                                }
-                                DragMode::TrimLeft => {
-                                    let new_off = (drag.original_offset_frames as i64 + delta_frames)
-                                        .max(0) as u64;
-                                    let new_len = drag.original_length_frames.saturating_sub(
-                                        (delta_frames.max(0) as u64).min(drag.original_length_frames),
-                                    );
-                                    app.update_clip_trim(track_idx, clip_id, None, Some(new_off), Some(new_len));
-                                }
-                                DragMode::TrimRight => {
-                                    let new_len = (drag.original_length_frames as i64 + delta_frames)
-                                        .max(1) as u64;
-                                    app.update_clip_trim(track_idx, clip_id, None, None, Some(new_len));
-                                }
-                                DragMode::FadeIn => {
-                                    let new_fade = (drag.original_fade_in as i64 + delta_frames).max(0) as u64;
-                                    app.update_clip_fade(track_idx, clip_id, Some(new_fade), None);
-                                }
-                                DragMode::FadeOut => {
-                                    let new_fade = (drag.original_fade_out as i64 - delta_frames).max(0) as u64;
-                                    app.update_clip_fade(track_idx, clip_id, None, Some(new_fade));
-                                }
-                            }
-                            return;
-                        }
-                    }
-                }
-
                 if response.dragged() && app.timeline_state.drag_state.is_none() {
                     let local_x = pos.x as f64;
                     let local_y = pos.y as f64;
@@ -416,6 +470,7 @@ pub fn handle_interaction(
                         app.timeline_state.drag_state = Some(DragState {
                             clip_id,
                             track_index: track_idx,
+                            original_track_index: track_idx,
                             drag_start_x: pos.x as f64,
                             original_position_frames: 0,
                             original_offset_frames: 0,
@@ -430,6 +485,7 @@ pub fn handle_interaction(
                         app.timeline_state.drag_state = Some(DragState {
                             clip_id,
                             track_index: track_idx,
+                            original_track_index: track_idx,
                             drag_start_x: pos.x as f64,
                             original_position_frames: 0,
                             original_offset_frames: 0,
@@ -445,6 +501,7 @@ pub fn handle_interaction(
                         app.timeline_state.drag_state = Some(DragState {
                             clip_id,
                             track_index: track_idx,
+                            original_track_index: track_idx,
                             drag_start_x: pos.x as f64,
                             original_position_frames: position_frames,
                             original_offset_frames: 0,
@@ -459,6 +516,7 @@ pub fn handle_interaction(
                         app.timeline_state.drag_state = Some(DragState {
                             clip_id,
                             track_index: track_idx,
+                            original_track_index: track_idx,
                             drag_start_x: pos.x as f64,
                             original_position_frames: position_frames,
                             original_offset_frames: 0,
@@ -472,6 +530,7 @@ pub fn handle_interaction(
                     app.timeline_state.drag_state = Some(DragState {
                         clip_id,
                         track_index: track_idx,
+                        original_track_index: track_idx,
                         drag_start_x: pos.x as f64,
                         original_position_frames: position_frames,
                         original_offset_frames: 0,
@@ -481,6 +540,12 @@ pub fn handle_interaction(
                         mode: DragMode::Move,
                     });
                     app.timeline_state.selected_clip_id = Some(clip_id);
+                    return;
+                }
+
+                if response.clicked_by(egui::PointerButton::Secondary) {
+                    app.timeline_state.selected_clip_id = Some(clip_id);
+                    app.timeline_state.clip_context_menu = Some((track_idx, clip_id));
                     return;
                 }
 

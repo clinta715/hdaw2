@@ -90,6 +90,9 @@ pub fn handle_keyboard_input(app: &mut HdawApp, ctx: &egui::Context) {
         if input.consume_key(egui::Modifiers::NONE, Key::CloseBracket) {
             app.set_loop_end_at_playhead();
         }
+        if input.consume_key(egui::Modifiers::NONE, Key::S) {
+            app.split_selected_clip();
+        }
         if input.consume_key(egui::Modifiers::NONE, Key::M) {
             let count = app.project.markers.len() + 1;
             app.add_marker_at_playhead(format!("M{}", count));
@@ -141,7 +144,7 @@ pub fn handle_pending_requests(app: &mut HdawApp, ctx: &egui::Context) {
 
     if app.new_project_requested {
         app.new_project_requested = false;
-        if app.undo_service.can_undo() && app.confirm_unsaved.is_none() {
+        if app.has_unsaved_changes() && app.confirm_unsaved.is_none() {
             app.confirm_unsaved = Some(crate::app::UnsavedChangesAction::NewProject);
         } else {
             app.new_project();
@@ -174,7 +177,7 @@ pub fn handle_pending_requests(app: &mut HdawApp, ctx: &egui::Context) {
 
     if app.open_requested {
         app.open_requested = false;
-        if app.undo_service.can_undo() && app.confirm_unsaved.is_none() {
+        if app.has_unsaved_changes() && app.confirm_unsaved.is_none() {
             app.confirm_unsaved = Some(crate::app::UnsavedChangesAction::OpenProject);
         } else {
             let mut dialog = make_dialog_with_dir(app.preferences.last_open_dir.as_ref());

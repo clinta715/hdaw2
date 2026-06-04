@@ -40,7 +40,7 @@ pub fn evaluate_effect_params(
             if let Some(inst) = fx_chain.iter_mut().find(|e| e.id == eid) {
                 let val = lane.get_value_at(time_frames);
                 if !val.is_nan() {
-                    inst.set_parameter(lane.param_id, val);
+                    inst.try_set_parameter(lane.param_id, val);
                 }
             }
         }

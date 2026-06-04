@@ -6,6 +6,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct GainPoint {
+    pub time_frames: u64,
+    pub value: f32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioClip {
     pub id: Uuid,
@@ -18,6 +24,8 @@ pub struct AudioClip {
     pub fade_in_frames: u64,
     #[serde(default)]
     pub fade_out_frames: u64,
+    #[serde(default)]
+    pub gain_points: Vec<GainPoint>,
     pub source_path: Option<PathBuf>,
     #[serde(skip)]
     pub buffer: Option<AudioBuffer>,
@@ -38,6 +46,7 @@ impl AudioClip {
             gain: 1.0,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            gain_points: Vec::new(),
             source_path: None,
             buffer: Some(buffer),
             waveform_peaks: Some(Arc::new(peaks)),
@@ -56,6 +65,7 @@ impl AudioClip {
             gain: 1.0,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            gain_points: Vec::new(),
             source_path: Some(source_path),
             buffer: Some(buffer),
             waveform_peaks: Some(Arc::new(peaks)),

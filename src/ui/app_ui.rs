@@ -11,6 +11,13 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 pub fn render(app: &mut HdawApp, ctx: &Context) {
+    ctx.all_styles_mut(|style| {
+        style.visuals = if app.preferences.dark_mode {
+            egui::Visuals::dark()
+        } else {
+            egui::Visuals::light()
+        };
+    });
     let is_playing = app.is_playing();
     let pos = app.position_seconds();
     let bpm = app.project.bpm;
@@ -66,7 +73,7 @@ pub fn render(app: &mut HdawApp, ctx: &Context) {
             app.preferences.recent_files.clear();
             crate::app::prefs_io::save_preferences(&app.preferences);
         } else if path.exists() {
-            if app.undo_service.can_undo() && app.confirm_unsaved.is_none() {
+            if app.has_unsaved_changes() && app.confirm_unsaved.is_none() {
                 app.pending_open_path = Some(path);
                 app.confirm_unsaved = Some(crate::app::UnsavedChangesAction::OpenProject);
             } else {
@@ -136,6 +143,9 @@ pub fn render(app: &mut HdawApp, ctx: &Context) {
     }
     if action.about_clicked {
         app.show_about = true;
+    }
+    if action.shortcuts_clicked {
+        app.show_shortcuts = true;
     }
     if action.export_clicked {
         app.export_requested = true;
@@ -235,7 +245,7 @@ pub fn render(app: &mut HdawApp, ctx: &Context) {
 
     // 4. Intercept window close if unsaved changes
     if ctx.input(|i| i.viewport().close_requested()) && app.confirm_unsaved.is_none() {
-        if app.undo_service.can_undo() {
+        if app.has_unsaved_changes() {
             app.confirm_unsaved = Some(UnsavedChangesAction::CloseApp);
         }
     }
@@ -280,7 +290,53 @@ pub fn render(app: &mut HdawApp, ctx: &Context) {
             });
     }
 
-    // 6. About dialog
+    // 6. Keyboard Shortcuts dialog
+    if app.show_shortcuts {
+        egui::Window::new("Keyboard Shortcuts")
+            .collapsible(false)
+            .resizable(true)
+            .default_size(Vec2::new(400.0, 350.0))
+            .anchor(egui::Align2::CENTER_CENTER, (0.0, 0.0))
+            .open(&mut app.show_shortcuts)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                egui::Grid::new("shortcuts_grid")
+                    .striped(true)
+                    .min_col_width(120.0)
+                    .max_col_width(200.0)
+                    .show(ui, |ui| {
+                        let shortcuts = [
+                            ("Space", "Play / Pause"),
+                            ("Shift+Space", "Play / Pause (alt)"),
+                            ("Delete / Backspace", "Delete selected clip"),
+                            ("Ctrl+N", "New Project"),
+                            ("Ctrl+O", "Open Project"),
+                            ("Ctrl+S", "Save"),
+                            ("Ctrl+Shift+S", "Save As"),
+                            ("Ctrl+Z", "Undo"),
+                            ("Ctrl+Shift+Z", "Redo"),
+                            ("Ctrl+I", "Import Audio"),
+                            ("Ctrl+Shift+I", "Import MIDI"),
+                            ("Ctrl+,", "Preferences"),
+                            ("F2", "Toggle FX Editor"),
+                            ("Home", "Go to start"),
+                            ("End", "Go to end"),
+                            ("L", "Toggle Loop"),
+                            ("[", "Set loop start"),
+                            ("]", "Set loop end"),
+                            ("Escape", "Close Piano Roll"),
+                        ];
+                        for (key, desc) in &shortcuts {
+                            ui.label(egui::RichText::new(*key).strong());
+                            ui.label(*desc);
+                            ui.end_row();
+                        }
+                    });
+                    });
+            });
+    }
+
+    // 7. About dialog
     if app.show_about {
         egui::Window::new("About HDAW")
             .collapsible(false)
@@ -310,15 +366,17 @@ pub fn render(app: &mut HdawApp, ctx: &Context) {
                 .anchor(egui::Align2::CENTER_CENTER, (0.0, 0.0))
                 .show(ctx, |ui| {
                     ui.set_min_width(400.0);
-                    ui.horizontal_wrapped(|ui| {
-                        ui.set_min_height(24.0);
-                        for desc in &instruments {
-                            let name = truncate(&desc.name, 35);
-                            if ui.button(name).clicked() {
-                                app.add_instrument_track(desc);
-                                app.show_instrument_dialog = false;
+                    egui::ScrollArea::vertical().max_height(400.0).show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.set_min_height(24.0);
+                            for desc in &instruments {
+                                let name = truncate(&desc.name, 35);
+                                if ui.button(name).clicked() {
+                                    app.add_instrument_track(desc);
+                                    app.show_instrument_dialog = false;
+                                }
                             }
-                        }
+                        });
                     });
                     ui.separator();
                     if ui.button("Cancel").clicked() {

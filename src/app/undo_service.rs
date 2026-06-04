@@ -27,6 +27,10 @@ impl UndoService {
     pub fn clear(&mut self) {
         self.stack.clear();
     }
+
+    pub fn undo_index(&self) -> usize {
+        self.stack.saved_index()
+    }
 }
 
 impl Default for UndoService {

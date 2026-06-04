@@ -1,6 +1,42 @@
 # HDAW Architecture Guide for AI Agents
 
-## v0.6.0 Changes (MIDI Pipeline Fixes + UI Polish)
+## v0.7.0 Changes (GUI Performance + Mixer Fixes + Clip Operations)
+
+### Audio Engine Performance
+- **Thread-local scratch buffers** (`stream.rs`): 6 heap allocations per audio callback eliminated — `group_indices`, `return_indices`, `uuid_to_idx` HashMap, `in_degree`, `children`, `queue` all moved to `thread_local!` buffers that reuse memory via `clear()` + `resize()`/`extend()`. Previously these were `collect()`ed fresh every callback.
+- **`catch_unwind` in audio callback** (`stream.rs`): Audio callback wrapped in `std::panic::catch_unwind` with `AssertUnwindSafe`. Prevents panics from unwinding through the C FFI boundary (undefined behavior). On panic: fills with silence, sets rebuild flag. Also recovers from Mutex poisoning (`tracks.lock().ok()`) so the audio callback can resume on the next frame instead of being permanently stuck.
+- **Non-blocking `try_set_parameter`** (`clap_effect.rs`, `dsp_effect.rs`, `automation_proc.rs`): `evaluate_effect_params` now calls `try_set_parameter()` instead of `set_parameter()`. Uses `pending_params.try_lock()` (non-blocking) instead of `adapter.lock()` (blocking). Audio thread never stalls on UI-held locks.
+- **`pending_params` cap** (`clap_effect.rs`): Vec capped at 1024 entries to prevent unbounded growth if `try_lock()` fails repeatedly.
+- **Mutex poison recovery**: Every `try_lock()` in the audio callback path (`stream.rs`, `engine.rs`, `midi_dispatch.rs`, `process.rs`) now has an `else` branch with `lock().ok()` to recover from poisoned mutexes. Prevents the "fizzle out → cursor freezes → can't restart" cascade.
+
+### GUI Performance
+- **Clip mixing overlap-range optimization** (`process.rs`): Clip mixing loop now computes `overlap_start`/`overlap_end` between buffer and clip, iterates only the overlap range. Eliminates per-frame boundary checks.
+- **MIDI post-processing merge** (`midi_dispatch.rs`): Clamping + output detection + volume multiply merged from 3 loops into 1 pass over the buffers.
+- **Metronome sine table** (`stream.rs`): Pre-computed `METRONOME_SIN_TABLE` thread-local, avoids `sin()` calls per sample in the audio thread.
+- **Scroll areas for all popup windows**: `Preferences`, `Effect Editor`, `Select Effect`, `Select Instrument`, `Keyboard Shortcuts` all wrapped in `egui::ScrollArea::vertical()`. Prevents wheel events from passing through to the main timeline. Keyboard Shortcuts window made resizable.
+- **Mouse wheel routing**: Timeline `handle_zoom_and_scroll` and piano roll scroll handler both check pointer position against their own rect before consuming scroll events — prevents sub-windows from stealing wheel events from each other.
+- **GUI hardcoded sizes → named constants** (Phase 2): Added 23 new constants across 8 files. See the table in [v0.6.0](#v060-changes-midi-pipeline-fixes--ui-polish) for the full list.
+
+### Mixer Panel Fixes
+- **Master volume slider now works** (`mixer_panel.rs`): Previously `app_ui.rs` overwrote the slider's value with the engine's value every frame. Now `draw_master` returns the new value and `render` syncs it to the engine only on change.
+- **Channel volume synced to project model** (`mixer_panel.rs`): Volume slider now writes to `project.tracks[index].volume` so changes persist on save/reload.
+- **Send index mapping by UUID** (`mixer_panel.rs`): Send names now looked up by `target_id` from `SendSlotDef`, not by position index. Survives return track reordering/deletion.
+- **`TrackUiState` clone optimized** (`mixer_panel.rs`): Full clone moved from per-channel to once in `render`, passed as `&[TrackUiState]` slice.
+- **Return names truncated** (`mixer_panel.rs`): Send slider labels truncated to 6 chars to fit 70px channel width.
+
+### Clip Operations (Right-Click Context Menu)
+- **Right-click on any clip** (`clips.rs`): Opens context menu with Copy, Paste, Duplicate, Glue, Delete, Rename.
+- **Copy/Paste** (`mod.rs`, `commands.rs`): `app.clipboard: Option<ClipKind>` stores the copied clip. Paste places it at the playhead position on the same track. Creates engine `ClipHandle` for audio or MIDI as appropriate.
+- **Duplicate** (`commands.rs`): Clones clip right after the original's end position. Full undo support via `DuplicateClip` variant.
+- **Rename** (`mod.rs`): Inline rename dialog with text input + Enter/OK to apply.
+- **Split at playhead** (`commands.rs`, `input.rs`): `S` key splits the selected clip at the playhead position. Creates two clips: left retains original offset with trimmed length, right is a new clip placed at the split point. MIDI notes are split between the two clips based on `start_frame`.
+- **Glue (Cubase-style seam click)** (`clips.rs`, `commands.rs`): Primary-click within 6px of the boundary between two adjacent clips merges them. Also available in right-click menu (glues with the next clip). Audio clips concatenate buffers; MIDI clips combine notes with adjusted `start_frame`. Undo via `GlueClips` variant.
+- **Cross-track clip dragging** (`clips.rs`, `interaction.rs`, `commands.rs`): Drag handling moved outside the track-iteration loop so clips track the mouse across tracks. `DragState` gets `original_track_index`. On drag end, calls `move_clip_to_track()` if the track changed. Undo via `MoveClipToTrack` variant.
+
+### Unsaved Changes Robustness
+- **Checkpoint-based dirty detection** (`mod.rs`, `project_io.rs`, `input.rs`, `app_ui.rs`): Replaced `undo_service.can_undo()` with `has_unsaved_changes()` which compares current undo stack index to `saved_at_undo_index`. Updated on every save, new project, load, and Don't Save. Prevents false prompts in fresh projects.
+
+### v0.6.0 Changes (MIDI Pipeline Fixes + UI Polish)
 
 ### MIDI → CLAP → Audio Pipeline Bugs Fixed
 - **NoteOn offset 1 during seek** (`midi_dispatch.rs`): Both NoteOff and NoteOn were at offset 0 during seek. `EventBuffer::sort()` uses `sort_unstable_by_key`, which can reorder equal-key events. NoteOn is now at offset 1 so NoteOff(0) always comes first. **Critical**: any code that appends events to the same `EventBuffer` at the same offset risks reordering — always bump one event by 1 sample when ordering matters.
@@ -259,6 +295,12 @@ These are `thread_local! RefCell<Vec<f32>>` (or `EventBuffer`) that grow on firs
 | | | |
 | | _New files added in v0.6.0_ | |
 | `tests/midi_pipeline_test.rs` | 202 | Integration tests for MIDI→CLAP→audio pipeline |
+| | | |
+| | _New files added in v0.7.0_ | |
+| `src/audio/effects/chorus.rs` | ~100 | Chorus effect (modulated delay + LFO) |
+| `src/audio/effects/flanger.rs` | ~100 | Flanger effect (short delay + feedback) |
+| `src/audio/effects/phaser.rs` | ~100 | Phaser effect (6-stage allpass chain) |
+| `src/audio/effects/distortion.rs` | ~70 | Distortion effect (tanh waveshaper) |
 
 ## Common Patterns to Follow
 

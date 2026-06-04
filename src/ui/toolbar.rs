@@ -40,6 +40,7 @@ pub struct ToolbarAction {
     pub metronome_clicked: bool,
     pub export_clicked: bool,
     pub about_clicked: bool,
+    pub shortcuts_clicked: bool,
 }
 
 impl Default for ToolbarAction {
@@ -72,6 +73,7 @@ impl Default for ToolbarAction {
             metronome_clicked: false,
             export_clicked: false,
             about_clicked: false,
+            shortcuts_clicked: false,
         }
     }
 }
@@ -227,6 +229,10 @@ pub fn render(
             });
 
             ui.menu_button("Help", |ui| {
+                if ui.button("Keyboard Shortcuts...").clicked() {
+                    action.shortcuts_clicked = true;
+                    ui.close_menu();
+                }
                 if ui.button("About HDAW...").clicked() {
                     action.about_clicked = true;
                     ui.close_menu();

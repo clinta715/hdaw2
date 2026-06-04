@@ -85,7 +85,7 @@ fn write_param(app: &mut HdawApp, track_idx: usize, effect_idx: usize, param_id:
     }
     if let Some(track) = app.project.tracks.get_mut(track_idx) {
         if let Some(fx) = track.fx_chain.get_mut(effect_idx) {
-            if let Some(pv) = fx.param_values.get_mut(param_id as usize - 1) {
+            if let Some(pv) = fx.param_values.get_mut(param_id as usize) {
                 *pv = value;
             }
         }
@@ -152,7 +152,10 @@ fn remove_effect(app: &mut HdawApp, track_idx: usize, effect_idx: usize) {
 }
 
 fn add_builtin_effect(app: &mut HdawApp, track_idx: usize, name: &str, etype: EffectType) {
-    let instance = EffectInstance::new_builtin(name.to_string(), etype.clone(), create_effect(etype.clone()));
+    let sr = app.engine.transport.sample_rate();
+    let mut effect = create_effect(etype.clone());
+    effect.reset(sr);
+    let instance = EffectInstance::new_builtin(name.to_string(), etype.clone(), effect);
     let effect_index;
     let serialized;
     if let Ok(mut ts) = app.engine.tracks.lock() {
@@ -207,12 +210,16 @@ fn add_clap_effect(app: &mut HdawApp, track_idx: usize, desc: &crate::audio::cla
     });
 }
 
-const EFFECT_TYPES: [(&str, EffectType); 5] = [
+const EFFECT_TYPES: [(&str, EffectType); 9] = [
     ("Gain",       EffectType::Gain),
     ("EQ",         EffectType::Equalizer),
     ("Compressor", EffectType::Compressor),
     ("Reverb",     EffectType::Reverb),
     ("Delay",      EffectType::Delay),
+    ("Chorus",     EffectType::Chorus),
+    ("Flanger",    EffectType::Flanger),
+    ("Phaser",     EffectType::Phaser),
+    ("Distortion", EffectType::Distortion),
 ];
 
 pub fn render(ctx: &Context, app: &mut HdawApp) {
@@ -251,32 +258,37 @@ pub fn render(ctx: &Context, app: &mut HdawApp) {
             .default_width(400.0)
             .anchor(egui::Align2::CENTER_CENTER, (0.0, 0.0))
             .show(ctx, |ui| {
-                ui.label("Built-in");
-                for (name, etype) in &EFFECT_TYPES {
-                    if ui.button(*name).clicked() {
-                        add_builtin_effect(app, track_idx, name, etype.clone());
-                        app.effect_editor_state.show_add_menu = false;
-                    }
-                }
-                if !app.plugin_registry.is_empty() {
-                    ui.separator();
-                    ui.label("CLAP Plugins");
+                egui::ScrollArea::vertical().max_height(400.0).show(ui, |ui| {
+                    ui.label("Built-in");
                     ui.horizontal_wrapped(|ui| {
                         ui.set_min_height(24.0);
-                        let descriptors = app.plugin_registry.clone();
-                        for desc in &descriptors {
-                            let label = if desc.is_instrument {
-                                truncate(&format!("{} [instrument]", desc.name), 40)
-                            } else {
-                                truncate(&desc.name, 35)
-                            };
-                            if ui.button(label).clicked() {
-                                add_clap_effect(app, track_idx, desc);
+                        for (name, etype) in &EFFECT_TYPES {
+                            if ui.button(*name).clicked() {
+                                add_builtin_effect(app, track_idx, name, etype.clone());
                                 app.effect_editor_state.show_add_menu = false;
                             }
                         }
                     });
-                }
+                    if !app.plugin_registry.is_empty() {
+                        ui.separator();
+                        ui.label("CLAP Plugins");
+                        ui.horizontal_wrapped(|ui| {
+                            ui.set_min_height(24.0);
+                            let descriptors = app.plugin_registry.clone();
+                            for desc in &descriptors {
+                                let label = if desc.is_instrument {
+                                    truncate(&format!("{} [instrument]", desc.name), 40)
+                                } else {
+                                    truncate(&desc.name, 35)
+                                };
+                                if ui.button(label).clicked() {
+                                    add_clap_effect(app, track_idx, desc);
+                                    app.effect_editor_state.show_add_menu = false;
+                                }
+                            }
+                        });
+                    }
+                });
                 ui.separator();
                 if ui.button("Cancel").clicked() {
                     app.effect_editor_state.show_add_menu = false;
@@ -295,6 +307,7 @@ pub fn render(ctx: &Context, app: &mut HdawApp) {
         .default_width(app.preferences.effect_panel_width)
         .min_width(200.0)
         .show(ctx, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("FX Editor");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -450,6 +463,7 @@ pub fn render(ctx: &Context, app: &mut HdawApp) {
                     });
                 }
             }
+            });
         });
 
     app.effect_editor_state.selected_effect = selected;

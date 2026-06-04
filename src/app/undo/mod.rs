@@ -18,6 +18,32 @@ pub enum UndoCommand {
         old_position: u64,
         new_position: u64,
     },
+    MoveClipToTrack {
+        clip_id: uuid::Uuid,
+        old_track_index: usize,
+        new_track_index: usize,
+        old_position: u64,
+        new_position: u64,
+    },
+    DuplicateClip {
+        track_index: usize,
+        clip_id: uuid::Uuid,
+        new_clip_id: uuid::Uuid,
+    },
+    SplitClip {
+        track_index: usize,
+        clip_id: uuid::Uuid,
+        new_clip_id: uuid::Uuid,
+        old_length: u64,
+        left_length: u64,
+        right_length: u64,
+    },
+    GlueClips {
+        track_index: usize,
+        clip_a: ClipKind,
+        clip_b: ClipKind,
+        merged_clip: ClipKind,
+    },
     TrimClip {
         track_index: usize,
         clip_id: uuid::Uuid,
@@ -183,6 +209,10 @@ impl UndoStack {
     pub fn clear(&mut self) {
         self.stack.clear();
         self.index = 0;
+    }
+
+    pub fn saved_index(&self) -> usize {
+        self.index
     }
 
     pub fn can_undo(&self) -> bool { self.index > 0 }

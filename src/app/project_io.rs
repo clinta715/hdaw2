@@ -127,6 +127,7 @@ impl HdawApp {
         self.effect_editor_state.selected_effect = None;
         self.current_path = None;
         self.undo_service.clear();
+        self.mark_saved();
         self.midi_thumb_cache.clear();
         self.waveform_cache.clear();
     }
@@ -136,6 +137,7 @@ impl HdawApp {
         project_service::save_to_file(&self.project, path)?;
         self.current_path = Some(PathBuf::from(path));
         self.undo_service.clear();
+        self.mark_saved();
         Ok(())
     }
 

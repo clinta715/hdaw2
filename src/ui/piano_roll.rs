@@ -74,29 +74,29 @@ pub fn render(ctx: &egui::Context, app: &mut HdawApp) {
         .resizable(true)
         .default_size(Vec2::new(init_w, init_h))
         .show(ctx, |ui| {
-            // Handle scroll and zoom
-            let mw_delta = ui.input(|i| i.raw_scroll_delta);
-            let modifiers = ui.input(|i| i.modifiers);
-            
-            if mw_delta.y != 0.0 {
-                if modifiers.ctrl {
-                    // Horizontal zoom
-                    let factor = 1.0 + mw_delta.y as f64 * 0.003;
-                    app.piano_roll_state.zoom_x = (app.piano_roll_state.zoom_x * factor).clamp(5.0, 2000.0);
-                } else if modifiers.alt {
-                    // Vertical zoom
-                    let factor = 1.0 + mw_delta.y as f64 * 0.003;
-                    app.piano_roll_state.zoom_y = (app.piano_roll_state.zoom_y * factor).clamp(8.0, 100.0);
-                } else if modifiers.shift {
-                    // Horizontal scroll
-                    app.piano_roll_state.scroll_x -= mw_delta.y as f64 * 2.0;
-                } else {
-                    // Vertical scroll
-                    app.piano_roll_state.scroll_y -= mw_delta.y as f64 * 2.0;
+            // Handle scroll and zoom — only when pointer is over this window
+            let is_over = ui.input(|i| i.pointer.hover_pos())
+                .map_or(false, |p| ui.clip_rect().contains(p));
+            if is_over {
+                let mw_delta = ui.input(|i| i.raw_scroll_delta);
+                let modifiers = ui.input(|i| i.modifiers);
+                
+                if mw_delta.y != 0.0 {
+                    if modifiers.ctrl {
+                        let factor = 1.0 + mw_delta.y as f64 * 0.003;
+                        app.piano_roll_state.zoom_x = (app.piano_roll_state.zoom_x * factor).clamp(5.0, 2000.0);
+                    } else if modifiers.alt {
+                        let factor = 1.0 + mw_delta.y as f64 * 0.003;
+                        app.piano_roll_state.zoom_y = (app.piano_roll_state.zoom_y * factor).clamp(8.0, 100.0);
+                    } else if modifiers.shift {
+                        app.piano_roll_state.scroll_x -= mw_delta.y as f64 * 2.0;
+                    } else {
+                        app.piano_roll_state.scroll_y -= mw_delta.y as f64 * 2.0;
+                    }
                 }
-            }
-            if mw_delta.x != 0.0 {
-                 app.piano_roll_state.scroll_x -= mw_delta.x as f64 * 2.0;
+                if mw_delta.x != 0.0 {
+                     app.piano_roll_state.scroll_x -= mw_delta.x as f64 * 2.0;
+                }
             }
 
             // Note length selector toolbar

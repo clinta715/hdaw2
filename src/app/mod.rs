@@ -110,6 +110,7 @@ pub struct HdawApp {
     pub error_message: Option<String>,
     pub show_instrument_dialog: bool,
     pub show_about: bool,
+    pub show_shortcuts: bool,
     pub show_piano_roll: bool,
     pub piano_roll_state: PianoRollState,
     pub editing_midi_clip_id: Option<Uuid>,
@@ -122,7 +123,10 @@ pub struct HdawApp {
     pub plugin_registry: Vec<PluginDescriptor>,
     pub waveform_cache: std::collections::HashMap<Uuid, egui::TextureHandle>,
     pub midi_thumb_cache: std::collections::HashMap<Uuid, egui::TextureHandle>,
-    pub active_plugin_guis: std::collections::HashMap<(usize, usize), PluginGuiState>, 
+    pub active_plugin_guis: std::collections::HashMap<(usize, usize), PluginGuiState>,
+    pub clipboard: Option<crate::project::clip::ClipKind>,
+    pub clip_rename_text: String,
+    saved_at_undo_index: usize,
 }
 
 impl HdawApp {
@@ -176,6 +180,7 @@ impl HdawApp {
             error_message: None,
             show_instrument_dialog: false,
             show_about: false,
+            show_shortcuts: false,
             show_piano_roll: false,
             piano_roll_state: PianoRollState::default(),
             editing_midi_clip_id: None,
@@ -189,6 +194,9 @@ impl HdawApp {
             waveform_cache: std::collections::HashMap::new(),
             midi_thumb_cache: std::collections::HashMap::new(),
             active_plugin_guis: std::collections::HashMap::new(),
+            clipboard: None,
+            clip_rename_text: String::new(),
+            saved_at_undo_index: 0,
         };
         
         let initial_prefs = app.preferences.clone();
@@ -201,6 +209,14 @@ impl HdawApp {
         app.scan_plugins();
         app.add_blank_track();
         app
+    }
+
+    pub fn has_unsaved_changes(&self) -> bool {
+        self.undo_service.undo_index() != self.saved_at_undo_index
+    }
+
+    fn mark_saved(&mut self) {
+        self.saved_at_undo_index = self.undo_service.undo_index();
     }
 
     pub fn master_volume(&self) -> f32 {

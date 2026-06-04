@@ -95,9 +95,8 @@ impl AudioEngine {
     }
 
     pub fn add_track(&self, handle: TrackHandle) {
-        if let Ok(mut list) = self.tracks.lock() {
-            list.push(handle);
-        }
+        let mut list = self.tracks.lock().unwrap_or_else(|e| e.into_inner());
+        list.push(handle);
     }
 
     pub fn play(&self) {
@@ -198,6 +197,7 @@ pub fn audio_callback(
         return;
     }
     let Ok(mut track_list) = tracks.try_lock() else {
+        tracks.lock().ok(); // Recover from poison so next callback can succeed
         data.fill(0.0);
         return;
     };

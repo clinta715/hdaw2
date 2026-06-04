@@ -55,6 +55,48 @@ impl GridDivision {
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct Theme {
+    pub bg_fill: egui::Color32,
+    pub grid_line: egui::Color32,
+    pub grid_bar: egui::Color32,
+    pub track_bg: egui::Color32,
+    pub track_bg_alt: egui::Color32,
+    pub text_normal: egui::Color32,
+    pub text_dim: egui::Color32,
+    pub clip_default: egui::Color32,
+    pub selection: egui::Color32,
+}
+
+impl Theme {
+    pub fn dark() -> Self {
+        Self {
+            bg_fill: egui::Color32::from_rgb(0x1e, 0x1e, 0x1e),
+            grid_line: egui::Color32::from_rgba_premultiplied(80, 80, 90, 40),
+            grid_bar: egui::Color32::from_rgba_premultiplied(100, 100, 120, 80),
+            track_bg: egui::Color32::from_rgb(0x2c, 0x2c, 0x2c),
+            track_bg_alt: egui::Color32::from_rgb(0x22, 0x22, 0x22),
+            text_normal: egui::Color32::from_gray(220),
+            text_dim: egui::Color32::from_gray(140),
+            clip_default: egui::Color32::from_rgb(0x5c, 0x3a, 0x8a),
+            selection: egui::Color32::from_rgb(0x64, 0xb5, 0xf6),
+        }
+    }
+    pub fn light() -> Self {
+        Self {
+            bg_fill: egui::Color32::from_rgb(0xf0, 0xf0, 0xf0),
+            grid_line: egui::Color32::from_rgba_premultiplied(160, 160, 170, 60),
+            grid_bar: egui::Color32::from_rgba_premultiplied(120, 120, 140, 100),
+            track_bg: egui::Color32::from_rgb(0xe0, 0xe0, 0xe0),
+            track_bg_alt: egui::Color32::from_rgb(0xd4, 0xd4, 0xd4),
+            text_normal: egui::Color32::from_gray(30),
+            text_dim: egui::Color32::from_gray(120),
+            clip_default: egui::Color32::from_rgb(0x9c, 0x7a, 0xca),
+            selection: egui::Color32::from_rgb(0x19, 0x70, 0xd2),
+        }
+    }
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct PreferencesState {
     pub show_dialog: bool,
@@ -96,9 +138,14 @@ pub struct PreferencesState {
     pub last_save_dir: Option<PathBuf>,
     #[serde(default)]
     pub recent_files: Vec<PathBuf>,
+    #[serde(default)]
+    pub dark_mode: bool,
 }
 
 impl PreferencesState {
+    pub fn theme(&self) -> Theme {
+        if self.dark_mode { Theme::dark() } else { Theme::light() }
+    }
     pub fn push_recent_file(&mut self, path: PathBuf) {
         self.recent_files.retain(|p| p != &path);
         self.recent_files.insert(0, path);
@@ -142,6 +189,7 @@ impl Default for PreferencesState {
             last_open_dir: None,
             last_save_dir: None,
             recent_files: Vec::new(),
+            dark_mode: true,
         }
     }
 }
@@ -160,6 +208,7 @@ pub fn render(ctx: &Context, app: &mut HdawApp) {
         .default_size(Vec2::new(400.0, 500.0))
         .resizable(true)
         .show(ctx, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
             CollapsingHeader::new("Audio")
                 .default_open(true)
                 .show(ui, |ui| {
@@ -315,6 +364,19 @@ pub fn render(ctx: &Context, app: &mut HdawApp) {
                             .speed(5.0)
                             .range(100.0..=600.0));
                     });
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label("Theme:");
+                        let dm = app.preferences.dark_mode;
+                        if ui.selectable_label(dm, "Dark").clicked() {
+                            app.preferences.dark_mode = true;
+                            apply = true;
+                        }
+                        if ui.selectable_label(!dm, "Light").clicked() {
+                            app.preferences.dark_mode = false;
+                            apply = true;
+                        }
+                    });
                 });
 
             ui.add_space(8.0);
@@ -356,6 +418,7 @@ pub fn render(ctx: &Context, app: &mut HdawApp) {
                         apply = true;
                     }
                 });
+            });
             });
         });
 

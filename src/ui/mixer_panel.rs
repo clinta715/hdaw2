@@ -31,11 +31,15 @@ pub fn render(ctx: &Context, app: &mut crate::app::HdawApp) {
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        draw_master(ui, &mut app.mixer_state);
+                        let mv = app.master_volume();
+                        let new_mv = draw_master(ui, &mut app.mixer_state, mv);
+                        if (new_mv - mv).abs() > 0.001 {
+                            app.set_master_volume(new_mv);
+                        }
                         ui.separator();
-                        let track_count = app.track_ui.len();
-                        for i in 0..track_count {
-                            draw_channel(ui, i, app);
+                        let all_tracks: Vec<TrackUiState> = app.track_ui.clone();
+                        for i in 0..all_tracks.len() {
+                            draw_channel(ui, i, app, &all_tracks);
                             ui.separator();
                         }
                     });
@@ -44,7 +48,8 @@ pub fn render(ctx: &Context, app: &mut crate::app::HdawApp) {
     app.preferences.mixer_panel_height = panel_res.response.rect.height();
 }
 
-fn draw_master(ui: &mut egui::Ui, state: &mut MixerPanelState) {
+fn draw_master(ui: &mut egui::Ui, state: &mut MixerPanelState, initial_vol: f32) -> f32 {
+    state.master_volume = initial_vol;
     ui.vertical(|ui| {
         ui.set_width(CHANNEL_WIDTH);
 
@@ -54,9 +59,12 @@ fn draw_master(ui: &mut egui::Ui, state: &mut MixerPanelState) {
             let (master_rect, _) = ui.allocate_exact_size(egui::vec2(12.0, mh), egui::Sense::hover());
             draw_vu_meter(ui, master_rect, state.master_volume, false);
 
-            ui.add(egui::Slider::new(&mut state.master_volume, 0.0..=1.0)
+            let resp = ui.add(egui::Slider::new(&mut state.master_volume, 0.0..=1.0)
                 .vertical()
                 .show_value(false));
+            if resp.changed() {
+                // return value signals caller to sync to engine
+            }
         }
 
         ui.add_space(2.0);
@@ -64,10 +72,10 @@ fn draw_master(ui: &mut egui::Ui, state: &mut MixerPanelState) {
             ui.label(format!("{:.1} dB", 20.0 * state.master_volume.max(0.0001).log10()));
         });
     });
+    state.master_volume
 }
 
-fn draw_channel(ui: &mut egui::Ui, index: usize, app: &mut crate::app::HdawApp) {
-    let all_tracks: Vec<TrackUiState> = app.track_ui.clone();
+fn draw_channel(ui: &mut egui::Ui, index: usize, app: &mut crate::app::HdawApp, all_tracks: &[TrackUiState]) {
     let tui = &all_tracks[index];
     let _color = Color32::from_rgb(tui.color[0], tui.color[1], tui.color[2]);
     let muted = tui.mute.load(Ordering::Acquire);
@@ -94,6 +102,9 @@ fn draw_channel(ui: &mut egui::Ui, index: usize, app: &mut crate::app::HdawApp) 
                 .show_value(false));
             if response.changed() {
                 app.track_ui[index].volume.store(vol.to_bits(), Ordering::Release);
+                if let Some(track) = app.project.tracks.get_mut(index) {
+                    track.volume = vol;
+                }
             }
         }
 
@@ -134,13 +145,14 @@ fn draw_channel(ui: &mut egui::Ui, index: usize, app: &mut crate::app::HdawApp) 
         if send_levels_count > 0 {
             ui.add_space(4.0);
             ui.label(egui::RichText::new("Sends").small().color(Color32::from_gray(160)));
+            // Look up return names by target_id from project model
+            let project_sends = app.project.tracks.get(index).map(|t| t.sends.clone()).unwrap_or_default();
             for si in 0..send_levels_count.min(4) {
                 let mut level = f32::from_bits(app.track_ui[index].send_levels[si].load(Ordering::Acquire));
-                let return_name = all_tracks.iter()
-                    .filter(|t| t.is_return)
-                    .nth(si)
-                    .map(|t| t.name.as_str())
-                    .unwrap_or("?");
+                let return_name = project_sends.get(si)
+                    .and_then(|s| all_tracks.iter().find(|t| t.id == s.target_id))
+                    .map(|t| if t.name.len() > 6 { format!("{}…", &t.name[..6]) } else { t.name.clone() })
+                    .unwrap_or_else(|| "?".to_string());
                 let resp = ui.add(Slider::new(&mut level, 0.0..=1.0).text(return_name));
                 if resp.changed() {
                     app.set_send_level(index, si, level);

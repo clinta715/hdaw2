@@ -178,10 +178,26 @@ impl ClapEffectAdapter {
         self.state.parameter_value(id)
     }
 
+    const PENDING_CAP: usize = 1024;
+
     pub fn set_parameter(&mut self, id: ParamId, value: f32) {
         self.state.set_parameter(id, value);
         if let Ok(mut pending) = self.pending_params.lock() {
-            pending.push((id as u32, value as f64));
+            if pending.len() < Self::PENDING_CAP {
+                pending.push((id as u32, value as f64));
+            }
+        }
+    }
+
+    /// Non-blocking variant for audio-thread use. Uses `try_lock` so it never
+    /// stalls the audio callback if the UI thread holds the lock. If the lock
+    /// is contended, the update is dropped — the next callback retries.
+    pub fn try_set_parameter(&self, id: ParamId, value: f32) {
+        self.state.set_parameter(id, value);
+        if let Ok(mut pending) = self.pending_params.try_lock() {
+            if pending.len() < Self::PENDING_CAP {
+                pending.push((id as u32, value as f64));
+            }
         }
     }
 
@@ -324,9 +340,11 @@ impl ClapEffectAdapter {
             let mut out_r_buf = sor.borrow_mut();
 
             in_l_buf.clear();
-            in_l_buf.extend_from_slice(input_l);
+            in_l_buf.resize(frames, 0.0);
+            in_l_buf[..frames].copy_from_slice(&input_l[..frames]);
             in_r_buf.clear();
-            in_r_buf.extend_from_slice(input_r);
+            in_r_buf.resize(frames, 0.0);
+            in_r_buf[..frames].copy_from_slice(&input_r[..frames]);
             
             out_l_buf.clear();
             out_l_buf.resize(frames, 0.0);

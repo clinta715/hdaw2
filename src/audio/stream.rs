@@ -10,7 +10,6 @@ use std::cell::RefCell;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
-use uuid::Uuid;
 
 thread_local! {
     pub static SCRATCH_L: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
@@ -20,6 +19,13 @@ thread_local! {
     static GROUP_ACCUM_R: RefCell<Vec<Vec<f32>>> = const { RefCell::new(Vec::new()) };
     static RETURN_ACCUM_L: RefCell<Vec<Vec<f32>>> = const { RefCell::new(Vec::new()) };
     static RETURN_ACCUM_R: RefCell<Vec<Vec<f32>>> = const { RefCell::new(Vec::new()) };
+    static GROUP_IDXS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    static RETURN_IDXS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    static UUID_TO_IDX: RefCell<std::collections::HashMap<uuid::Uuid, usize>> = RefCell::new(std::collections::HashMap::new());
+    static IN_DEGREE: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    static CHILDREN: RefCell<Vec<Vec<usize>>> = const { RefCell::new(Vec::new()) };
+    static KAHN_QUEUE: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    static METRONOME_SIN_TABLE: RefCell<Vec<f64>> = const { RefCell::new(Vec::new()) };
 }
 
 pub fn available_devices() -> Vec<String> {
@@ -78,6 +84,7 @@ pub fn build_stream(
     let master_bus = master_bus.clone();
     let tracks = tracks.clone();
     let rebuild_flag = needs_rebuild.clone();
+    let err_flag = rebuild_flag.clone();
 
     let stream = device.build_output_stream(
         &cpal::StreamConfig {
@@ -86,7 +93,15 @@ pub fn build_stream(
             channels,
         },
         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            super::engine::audio_callback(data, channels, &transport, &master_bus, &tracks);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                super::engine::audio_callback(data, channels, &transport, &master_bus, &tracks);
+            }));
+            if result.is_err() {
+                data.fill(0.0);
+                // Recover any mutex poisoned by the panic — guards were dropped during unwind
+                tracks.lock().ok();
+                err_flag.store(true, Ordering::Release);
+            }
         },
         move |_err| {
             rebuild_flag.store(true, Ordering::Release);
@@ -117,25 +132,38 @@ pub fn mix_tracks(
     let n_tracks = track_list.len();
     let any_solo = track_list.iter().any(|h| h.solo.load(Ordering::Acquire));
 
-    // Identify group/return track indices
-    let group_indices: Vec<usize> = (0..n_tracks).filter(|i| track_list[*i].is_group).collect();
-    let return_indices: Vec<usize> = (0..n_tracks).filter(|i| track_list[*i].is_return).collect();
-    let n_groups = group_indices.len();
-    let n_returns = return_indices.len();
-
-    // Resize per-group accumulators
     SCRATCH_L.with(|sl| {
     SCRATCH_R.with(|sr| {
     GROUP_ACCUM_L.with(|gl| {
     GROUP_ACCUM_R.with(|gr| {
     RETURN_ACCUM_L.with(|rl| {
     RETURN_ACCUM_R.with(|rr| {
+    GROUP_IDXS.with(|gi| {
+    RETURN_IDXS.with(|ri| {
+    UUID_TO_IDX.with(|ui| {
     let mut out_l = sl.borrow_mut();
     let mut out_r = sr.borrow_mut();
     out_l.clear();
     out_l.resize(frames, 0.0f32);
     out_r.clear();
     out_r.resize(frames, 0.0f32);
+
+    let mut group_indices = gi.borrow_mut();
+    let mut return_indices = ri.borrow_mut();
+    let mut uuid_to_idx = ui.borrow_mut();
+    group_indices.clear();
+    return_indices.clear();
+    uuid_to_idx.clear();
+    for i in 0..n_tracks {
+        if track_list[i].is_group {
+            group_indices.push(i);
+        } else if track_list[i].is_return {
+            return_indices.push(i);
+        }
+        uuid_to_idx.insert(track_list[i].id, i);
+    }
+    let n_groups = group_indices.len();
+    let n_returns = return_indices.len();
 
     // Resize group accumulators
     let mut g_l = gl.borrow_mut();
@@ -164,12 +192,6 @@ pub fn mix_tracks(
     drop(g_r);
     drop(r_l);
     drop(r_r);
-
-    // Build UUID → track index map
-    let mut uuid_to_idx: std::collections::HashMap<Uuid, usize> = std::collections::HashMap::new();
-    for (i, h) in track_list.iter().enumerate() {
-        uuid_to_idx.insert(h.id, i);
-    }
 
     // ===== Pass 1: Source tracks (non-group, non-return) =====
     for i in 0..n_tracks {
@@ -243,9 +265,16 @@ pub fn mix_tracks(
 
     // ===== Pass 2: Group tracks (topological order) =====
     if n_groups > 0 {
-        // Kahn's algorithm: process children before parents
-        let mut in_degree = vec![0usize; n_groups];
-        let mut children: Vec<Vec<usize>> = vec![Vec::new(); n_groups];
+        IN_DEGREE.with(|id| {
+        CHILDREN.with(|ch| {
+        KAHN_QUEUE.with(|kq| {
+        let mut in_degree = id.borrow_mut();
+        let mut children = ch.borrow_mut();
+        let mut queue = kq.borrow_mut();
+        in_degree.clear();
+        in_degree.resize(n_groups, 0usize);
+        children.clear();
+        children.resize(n_groups, Vec::new());
         for gi in 0..n_groups {
             let g_idx = group_indices[gi];
             let pg = track_list[g_idx].parent_group;
@@ -258,7 +287,12 @@ pub fn mix_tracks(
                 }
             }
         }
-        let mut queue: Vec<usize> = (0..n_groups).filter(|gi| in_degree[*gi] == 0).collect();
+        queue.clear();
+        for gi in 0..n_groups {
+            if in_degree[gi] == 0 {
+                queue.push(gi);
+            }
+        }
         while !queue.is_empty() {
             let gi = queue.remove(0);
             let g_idx = group_indices[gi];
@@ -281,6 +315,8 @@ pub fn mix_tracks(
                                     let mut g_l = gl.borrow_mut();
                                     let mut g_r = gr.borrow_mut();
                                     a.process(&mut g_l[gi], &mut g_r[gi], sample_rate);
+                                } else {
+                                    adapter.lock().ok();
                                 }
                             }
                         }
@@ -336,6 +372,7 @@ pub fn mix_tracks(
                 }
             }
         }
+        });});});
     }
 
     // ===== Pass 3: Return tracks =====
@@ -361,6 +398,8 @@ pub fn mix_tracks(
                             let mut r_l = rl.borrow_mut();
                             let mut r_r = rr.borrow_mut();
                             a.process(&mut r_l[ri], &mut r_r[ri], sample_rate);
+                        } else {
+                            adapter.lock().ok();
                         }
                     }
                 }
@@ -391,15 +430,25 @@ pub fn mix_tracks(
             let beat_sample = ((beat * sr / beats_per_sec) - pos as f64) as usize;
             if beat_sample < frames {
                 let click_len = (0.01 * sr).min((frames - beat_sample) as f64) as usize;
-                let click_freq = 1000.0 / sr as f64 * std::f64::consts::TAU;
-                for j in 0..click_len {
-                    let idx = beat_sample + j;
-                    if idx >= frames { break; }
-                    let env = 1.0 - (j as f64 / click_len as f64);
-                    let sample = (j as f64 * click_freq).sin() as f32 * 0.3 * env as f32;
-                    out_l[idx] += sample;
-                    out_r[idx] += sample;
-                }
+                let click_freq = 1000.0 / sr as f64;
+                METRONOME_SIN_TABLE.with(|tbl| {
+                    let mut table = tbl.borrow_mut();
+                    let needed = click_len;
+                    if table.len() < needed {
+                        table.resize(needed, 0.0);
+                        for i in 0..needed {
+                            table[i] = (i as f64 * click_freq * std::f64::consts::TAU).sin();
+                        }
+                    }
+                    for j in 0..needed {
+                        let idx = beat_sample + j;
+                        if idx >= frames { break; }
+                        let env = 1.0 - (j as f64 / click_len as f64);
+                        let sample = table[j] as f32 * 0.3 * env as f32;
+                        out_l[idx] += sample;
+                        out_r[idx] += sample;
+                    }
+                });
             }
             beat += 1.0;
         }
@@ -419,7 +468,7 @@ pub fn mix_tracks(
             }
         }
     }
-    });});});});});});
+    });});});});});});});});});
 }
 
 #[cfg(windows)]

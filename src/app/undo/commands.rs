@@ -198,6 +198,85 @@ pub fn apply_undo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoC
                 }
             }
         }
+        UndoCommand::MoveClipToTrack { clip_id, old_track_index, new_track_index, old_position, .. } => {
+            // undo: move from new_track_index back to old_track_index
+            if new_track_index < tracks.len() {
+                let pos = tracks[new_track_index].clips.iter().position(|c| c.clip_id == clip_id);
+                if let Some(p) = pos {
+                    let mut ch = tracks[new_track_index].clips.remove(p);
+                    ch.set_position(old_position);
+                    if old_track_index < tracks.len() {
+                        tracks[old_track_index].clips.push(ch);
+                    }
+                }
+            }
+            if let Some(track) = project.tracks.get_mut(new_track_index) {
+                track.clips.retain(|c| match c {
+                    ClipKind::Audio(a) => a.id != clip_id,
+                    ClipKind::Midi(m) => m.id != clip_id,
+                });
+            }
+            // Find clip in project model and add to old track
+            let found = project.tracks.iter().flat_map(|t| t.clips.iter()).find(|c| match c {
+                ClipKind::Audio(a) => a.id == clip_id,
+                ClipKind::Midi(m) => m.id == clip_id,
+            }).cloned();
+            if let Some(c) = found {
+                if let Some(track) = project.tracks.get_mut(old_track_index) {
+                    track.add_clip(c);
+                }
+            }
+        }
+        UndoCommand::DuplicateClip { track_index, new_clip_id, .. } => {
+            if let Some(track) = project.tracks.get_mut(track_index) {
+                track.clips.retain(|c| match c {
+                    ClipKind::Audio(a) => a.id != new_clip_id,
+                    ClipKind::Midi(m) => m.id != new_clip_id,
+                });
+            }
+            if let Some(handle) = tracks.get_mut(track_index) {
+                handle.clips.retain(|c| c.clip_id != new_clip_id);
+            }
+        }
+        UndoCommand::SplitClip { track_index, clip_id, new_clip_id, old_length, .. } => {
+            // Undo split: remove right clip, restore original length
+            if let Some(track) = project.tracks.get_mut(track_index) {
+                track.clips.retain(|c| match c {
+                    ClipKind::Audio(a) => a.id != new_clip_id,
+                    ClipKind::Midi(m) => m.id != new_clip_id,
+                });
+                if let Some(ClipKind::Audio(a)) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Audio(a) if a.id == clip_id)) {
+                    a.length_frames = old_length;
+                }
+                if let Some(ClipKind::Midi(m)) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Midi(m) if m.id == clip_id)) {
+                    m.length_frames = old_length;
+                }
+            }
+            if let Some(handle) = tracks.get_mut(track_index) {
+                handle.clips.retain(|c| c.clip_id != new_clip_id);
+                if let Some(ch) = handle.clips.iter_mut().find(|c| c.clip_id == clip_id) {
+                    ch.set_length(old_length);
+                }
+            }
+        }
+        UndoCommand::GlueClips { track_index, ref clip_a, ref clip_b, ref merged_clip } => {
+            // Undo: remove merged clip, restore original two
+            let merged_id = match merged_clip {
+                ClipKind::Audio(a) => a.id,
+                ClipKind::Midi(m) => m.id,
+            };
+            if let Some(track) = project.tracks.get_mut(track_index) {
+                track.clips.retain(|c| match c {
+                    ClipKind::Audio(a) => a.id != merged_id,
+                    ClipKind::Midi(m) => m.id != merged_id,
+                });
+                track.add_clip(clip_a.clone());
+                track.add_clip(clip_b.clone());
+            }
+            if let Some(handle) = tracks.get_mut(track_index) {
+                handle.clips.retain(|c| c.clip_id != merged_id);
+            }
+        }
         UndoCommand::TrimClip { track_index, clip_id, old_offset, old_length, .. } => {
             if let Some(track) = project.tracks.get_mut(track_index) {
                 for clip in track.clips.iter_mut() {
@@ -233,15 +312,38 @@ pub fn apply_undo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoC
                 }).unwrap_or(track.clips.len());
                 match clip {
                     ClipKind::Audio(audio_clip) => {
+                        let samples: Vec<f32>;
+                        let ch_channels: u16;
+                        let ch_sr: u32;
                         if let Some(buf) = audio_clip.buffer.as_ref() {
-                            let ch = ClipHandle::new(audio_clip.id, (**buf.samples()).clone(), buf.channels(), buf.sample_rate());
-                            ch.set_position(audio_clip.position_frames);
-                            ch.set_offset(audio_clip.offset_frames);
-                            ch.set_length(audio_clip.length_frames);
-                            if let Some(handle) = tracks.get_mut(track_index) {
-                                let eng_pos = handle.find_clip_by_id(audio_clip.id).unwrap_or(handle.clips.len());
-                                handle.clips.insert(eng_pos, ch);
+                            samples = (**buf.samples()).clone();
+                            ch_channels = buf.channels();
+                            ch_sr = buf.sample_rate();
+                        } else {
+                            // Buffer was stripped to save undo memory — look it up from the pool
+                            let pool_buf = project.audio_pool.iter()
+                                .find(|p| matches!(&p.clip, ClipKind::Audio(a) if a.id == audio_clip.id))
+                                .and_then(|p| match &p.clip { ClipKind::Audio(a) => a.buffer.clone(), _ => None });
+                            match pool_buf {
+                                Some(buf) => {
+                                    samples = (**buf.samples()).clone();
+                                    ch_channels = buf.channels();
+                                    ch_sr = buf.sample_rate();
+                                }
+                                None => {
+                                    samples = Vec::new();
+                                    ch_channels = 0;
+                                    ch_sr = sample_rate;
+                                }
                             }
+                        }
+                        let ch = ClipHandle::new(audio_clip.id, samples, ch_channels, ch_sr);
+                        ch.set_position(audio_clip.position_frames);
+                        ch.set_offset(audio_clip.offset_frames);
+                        ch.set_length(audio_clip.length_frames);
+                        if let Some(handle) = tracks.get_mut(track_index) {
+                            let eng_pos = handle.find_clip_by_id(audio_clip.id).unwrap_or(handle.clips.len());
+                            handle.clips.insert(eng_pos, ch);
                         }
                     }
                     ClipKind::Midi(midi_clip) => {
@@ -402,6 +504,57 @@ pub fn apply_redo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoC
                 if let Some(ch) = handle.clips.iter().find(|c| c.clip_id == clip_id) {
                     ch.set_position(new_position);
                 }
+            }
+        }
+        UndoCommand::MoveClipToTrack { clip_id, old_track_index, new_track_index, new_position, .. } => {
+            // redo: move back from old_track_index to new_track_index
+            if old_track_index < tracks.len() {
+                let pos = tracks[old_track_index].clips.iter().position(|c| c.clip_id == clip_id);
+                if let Some(p) = pos {
+                    let mut ch = tracks[old_track_index].clips.remove(p);
+                    ch.set_position(new_position);
+                    if new_track_index < tracks.len() {
+                        tracks[new_track_index].clips.push(ch);
+                    }
+                }
+            }
+            if let Some(track) = project.tracks.get_mut(old_track_index) {
+                track.clips.retain(|c| match c {
+                    ClipKind::Audio(a) => a.id != clip_id,
+                    ClipKind::Midi(m) => m.id != clip_id,
+                });
+            }
+            let found = project.tracks.iter().flat_map(|t| t.clips.iter()).find(|c| match c {
+                ClipKind::Audio(a) => a.id == clip_id,
+                ClipKind::Midi(m) => m.id == clip_id,
+            }).cloned();
+            if let Some(c) = found {
+                if let Some(track) = project.tracks.get_mut(new_track_index) {
+                    track.add_clip(c);
+                }
+            }
+        }
+        UndoCommand::DuplicateClip { .. } => {}
+        UndoCommand::SplitClip { track_index, clip_id, left_length, .. } => {
+            if let Some(handle) = tracks.get_mut(track_index) {
+                if let Some(ch) = handle.clips.iter_mut().find(|c| c.clip_id == clip_id) {
+                    ch.set_length(left_length);
+                }
+            }
+        }
+        UndoCommand::GlueClips { track_index, ref clip_a, ref clip_b, ref merged_clip } => {
+            // Redo: redo glue by removing originals and adding merged
+            let a_id = match clip_a { ClipKind::Audio(a) => a.id, ClipKind::Midi(m) => m.id };
+            let b_id = match clip_b { ClipKind::Audio(a) => a.id, ClipKind::Midi(m) => m.id };
+            if let Some(track) = project.tracks.get_mut(track_index) {
+                track.clips.retain(|c| match c {
+                    ClipKind::Audio(a) => a.id != a_id && a.id != b_id,
+                    ClipKind::Midi(m) => m.id != a_id && m.id != b_id,
+                });
+                track.add_clip((*merged_clip).clone());
+            }
+            if let Some(handle) = tracks.get_mut(track_index) {
+                handle.clips.retain(|c| c.clip_id != a_id && c.clip_id != b_id);
             }
         }
         UndoCommand::TrimClip { track_index, clip_id, new_offset, new_length, .. } => {

@@ -11,6 +11,10 @@ pub enum EffectType {
     Compressor,
     Reverb,
     Delay,
+    Chorus,
+    Flanger,
+    Phaser,
+    Distortion,
     Clap { plugin_id: String, path: String },
 }
 
@@ -101,6 +105,20 @@ impl EffectInstance {
         match &mut self.kind {
             EffectKind::BuiltIn(effect) => effect.set_parameter(id, value),
             EffectKind::Clap(_) => self.lock_clap_mut().set_parameter(id, value),
+        }
+    }
+
+    /// Non-blocking variant for audio-thread use. For CLAP effects, uses
+    /// `try_lock` on the adapter — never stalls. For built-in effects,
+    /// delegates to the same set_parameter (no locking issue).
+    pub fn try_set_parameter(&self, id: ParamId, value: f32) {
+        match &self.kind {
+            EffectKind::BuiltIn(effect) => effect.set_parameter(id, value),
+            EffectKind::Clap(adapter) => {
+                if let Ok(a) = adapter.try_lock() {
+                    a.try_set_parameter(id, value);
+                }
+            }
         }
     }
 }

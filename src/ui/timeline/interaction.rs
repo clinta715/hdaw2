@@ -71,7 +71,34 @@ pub fn handle_drag_end_snap(response: &Response, app: &mut HdawApp) {
                 _ => {}
             }
 
-            if app.timeline_state.snap_enabled {
+            // Detect cross-track move
+            let is_cross_track = drag.mode == DragMode::Move && drag.track_index != drag.original_track_index;
+
+            if is_cross_track {
+                // Cross-track: move clip to new track
+                let sr = app.engine.transport.sample_rate();
+                let bpm = app.project.bpm;
+                let mut new_pos = old_pos;
+                // Find current position from project model
+                if let Some(track) = app.project.tracks.get(drag.original_track_index) {
+                    if let Some(pos_ref) = find_clip_pos(track, drag.clip_id) {
+                        new_pos = *pos_ref;
+                    }
+                }
+                if app.timeline_state.snap_enabled {
+                    new_pos = app.timeline_state.snap_frames_to_grid(new_pos, sr, bpm, &app.preferences, &app.project.markers);
+                }
+                app.move_clip_to_track(drag.clip_id, drag.original_track_index, drag.track_index, new_pos);
+                if old_pos != new_pos || drag.original_track_index != drag.track_index {
+                    app.undo_service.push(crate::app::undo::UndoCommand::MoveClipToTrack {
+                        clip_id: drag.clip_id,
+                        old_track_index: drag.original_track_index,
+                        new_track_index: drag.track_index,
+                        old_position: old_pos,
+                        new_position: new_pos,
+                    });
+                }
+            } else if app.timeline_state.snap_enabled {
                 let sr = app.engine.transport.sample_rate();
                 let bpm = app.project.bpm;
                 if let Some(track) = app.project.tracks.get_mut(drag.track_index) {

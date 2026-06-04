@@ -37,6 +37,7 @@ pub struct TimelineState {
     pub header_width: f32,
     pub track_height: f32,
     pub track_context_menu: Option<usize>,
+    pub clip_context_menu: Option<(usize, uuid::Uuid)>,
 }
 
 pub struct RulerContextMenu {
@@ -100,9 +101,11 @@ impl TimelineState {
     }
 }
 
+#[derive(Clone)]
 pub struct DragState {
     pub clip_id: uuid::Uuid,
     pub track_index: usize,
+    pub original_track_index: usize,
     pub drag_start_x: f64,
     pub original_position_frames: u64,
     pub original_offset_frames: u64,
@@ -118,6 +121,7 @@ pub struct AutoDragState {
     pub old_value: f32,
 }
 
+#[derive(Clone, Copy, PartialEq)]
 pub enum DragMode {
     Move,
     TrimLeft,
@@ -141,6 +145,7 @@ impl Default for TimelineState {
             header_width: DEFAULT_HEADER_WIDTH,
             track_height: DEFAULT_TRACK_HEIGHT,
             track_context_menu: None,
+            clip_context_menu: None,
         }
     }
 }
@@ -177,6 +182,7 @@ pub fn render(ui: &mut Ui, app: &mut HdawApp) {
         Some(loop_in),
         Some(loop_out),
         app.engine.transport.loop_enabled.load(Ordering::Acquire),
+
         sr,
         bpm,
         &app.project.tempo_events,
@@ -251,6 +257,7 @@ pub fn render(ui: &mut Ui, app: &mut HdawApp) {
     }
 
     handle_track_context_menu(ui, app);
+    handle_clip_context_menu(ui, app);
     handle_ruler_context_menu(ui, app);
 }
 
@@ -434,7 +441,192 @@ fn handle_track_context_menu(ui: &Ui, app: &mut HdawApp) {
     }
 }
 
+fn handle_clip_context_menu(ui: &Ui, app: &mut HdawApp) {
+    let (track_idx, clip_id) = match app.timeline_state.clip_context_menu {
+        Some(v) => v,
+        None => return,
+    };
+
+    let clip_name = app.project.tracks.get(track_idx)
+        .and_then(|t| t.clips.iter().find_map(|c| match c {
+            crate::project::clip::ClipKind::Audio(a) if a.id == clip_id => Some(a.name.clone()),
+            crate::project::clip::ClipKind::Midi(m) if m.id == clip_id => Some(m.name.clone()),
+            _ => None,
+        }))
+        .unwrap_or_default();
+
+    let has_clipboard = app.clipboard.is_some();
+    let mut close = false;
+
+    let wr = egui::Window::new(format!("Clip: {clip_name}"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::LEFT_TOP, (0.0, 0.0))
+        .show(ui.ctx(), |ui| {
+            if ui.button("Copy").clicked() {
+                if let Some(track) = app.project.tracks.get(track_idx) {
+                    if let Some(c) = track.clips.iter().find(|c| match c {
+                        crate::project::clip::ClipKind::Audio(a) => a.id == clip_id,
+                        crate::project::clip::ClipKind::Midi(m) => m.id == clip_id,
+                    }).cloned() {
+                        app.clipboard = Some(c);
+                    }
+                }
+                close = true;
+            }
+            if has_clipboard {
+                if ui.button("Paste").clicked() {
+                    if let Some(c) = app.clipboard.clone() {
+                        let new_id = uuid::Uuid::new_v4();
+                        match &c {
+                            crate::project::clip::ClipKind::Audio(a) => {
+                                let mut new = a.clone();
+                                new.id = new_id;
+                                new.position_frames = app.engine.transport.position_frames();
+                                if let Some(track) = app.project.tracks.get_mut(track_idx) {
+                                    track.add_clip(crate::project::clip::ClipKind::Audio(new));
+                                }
+                                if let Ok(mut tracks) = app.engine.tracks.lock() {
+                                    if let Some(handle) = tracks.get_mut(track_idx) {
+                                        let sr = app.engine.transport.sample_rate();
+                                        let ch = crate::project::clip_handle::ClipHandle::new(
+                                            new_id, (**a.buffer.as_ref().map(|b| b.samples()).unwrap()).clone(),
+                                            a.buffer.as_ref().map(|b| b.channels()).unwrap_or(0),
+                                            a.buffer.as_ref().map(|b| b.sample_rate()).unwrap_or(sr),
+                                        );
+                                        ch.set_position(app.engine.transport.position_frames());
+                                        handle.add_clip(ch);
+                                    }
+                                }
+                            }
+                            crate::project::clip::ClipKind::Midi(m) => {
+                                let mut new = m.clone();
+                                new.id = new_id;
+                                new.position_frames = app.engine.transport.position_frames();
+                                if let Some(track) = app.project.tracks.get_mut(track_idx) {
+                                    track.add_clip(crate::project::clip::ClipKind::Midi(new));
+                                }
+                                if let Ok(mut tracks) = app.engine.tracks.lock() {
+                                    if let Some(handle) = tracks.get_mut(track_idx) {
+                                        let sr = app.engine.transport.sample_rate();
+                                        let ch = crate::project::clip_handle::ClipHandle::new_midi(new_id, m.notes.clone(), m.length_frames, sr);
+                                        ch.set_position(app.engine.transport.position_frames());
+                                        handle.add_clip(ch);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    close = true;
+                }
+            }
+            ui.separator();
+            if ui.button("Duplicate").clicked() {
+                app.duplicate_clip(track_idx, clip_id);
+                close = true;
+            }
+            if ui.button("Glue").clicked() {
+                // Find adjacent clip after this one
+                if let Some(track) = app.project.tracks.get(track_idx) {
+                    let mut clips: Vec<(uuid::Uuid, u64)> = track.clips.iter().filter_map(|c| match c {
+                        crate::project::clip::ClipKind::Audio(a) => Some((a.id, a.position_frames)),
+                        crate::project::clip::ClipKind::Midi(m) => Some((m.id, m.position_frames)),
+                    }).collect();
+                    clips.sort_by_key(|c| c.1);
+                    let pos = clips.iter().position(|c| c.0 == clip_id);
+                    if let Some(idx) = pos {
+                        if idx + 1 < clips.len() {
+                            app.glue_clips(track_idx, clip_id, clips[idx + 1].0);
+                        }
+                    }
+                }
+                close = true;
+            }
+            if ui.button("Delete").clicked() {
+                app.timeline_state.selected_clip_id = Some(clip_id);
+                app.remove_selected_clip();
+                close = true;
+            }
+            if ui.button("Rename...").clicked() {
+                app.clip_rename_text = clip_name;
+                close = true;
+                // Rename handled inline: show text edit + apply button
+            }
+            ui.separator();
+            if ui.button("Close").clicked() {
+                close = true;
+            }
+        });
+
+    if !close {
+        if let Some(inner) = wr {
+            if ui.input(|i| i.pointer.primary_clicked()) {
+                if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+                    if !inner.response.rect.contains(pos) {
+                        close = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // Rename dialog
+    if app.clip_rename_text.len() > 0 && app.timeline_state.clip_context_menu.is_some() {
+        let mut rename_close = false;
+        egui::Window::new("Rename Clip")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, (0.0, 0.0))
+            .show(ui.ctx(), |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Name:");
+                    if ui.add(egui::TextEdit::singleline(&mut app.clip_rename_text)
+                        .desired_width(200.0)).lost_focus() {
+                        // Apply on Enter
+                        if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            rename_close = true;
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("OK").clicked() {
+                        rename_close = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        rename_close = true;
+                        app.clip_rename_text = String::new();
+                    }
+                });
+            });
+        if rename_close && !app.clip_rename_text.is_empty() {
+            if let Some(track) = app.project.tracks.get_mut(track_idx) {
+                for clip in track.clips.iter_mut() {
+                    match clip {
+                        crate::project::clip::ClipKind::Audio(a) if a.id == clip_id => {
+                            a.name = app.clip_rename_text.clone();
+                        }
+                        crate::project::clip::ClipKind::Midi(m) if m.id == clip_id => {
+                            m.name = app.clip_rename_text.clone();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            app.clip_rename_text = String::new();
+        }
+        if rename_close {
+            // Close the rename dialog
+        }
+    }
+
+    if close {
+        app.timeline_state.clip_context_menu = None;
+        app.clip_rename_text = String::new();
+    }
+}
+
 fn handle_ruler_context_menu(ui: &Ui, app: &mut HdawApp) {
+    let sr = app.engine.transport.sample_rate();
     let ctx_menu = match app.timeline_state.ruler_context_menu {
         Some(ref cm) => cm.frame,
         None => return,
@@ -483,6 +675,9 @@ fn handle_ruler_context_menu(ui: &Ui, app: &mut HdawApp) {
 }
 
 fn handle_zoom_and_scroll(ui: &Ui, response: &Response, rect: &Rect, app: &mut HdawApp, header_width: f32) {
+    let is_over = ui.input(|i| i.pointer.hover_pos())
+        .map_or(false, |p| p.x > rect.left() + header_width && rect.contains(p));
+    if !is_over { return; }
     let mw_delta = ui.input(|i| i.raw_scroll_delta);
     if mw_delta.y != 0.0 {
         let factor = 1.0 - mw_delta.y as f64 * 0.002;

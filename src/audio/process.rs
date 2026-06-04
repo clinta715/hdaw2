@@ -12,6 +12,29 @@ thread_local! {
     pub static PRE_FADER_R: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
 }
 
+/// Evaluate clip gain envelope at a given local frame.
+/// Linearly interpolates between gain points. Returns 1.0 if no points.
+fn eval_gain_envelope(local_frame: u64, points: &[crate::project::clip::GainPoint]) -> f32 {
+    if points.is_empty() {
+        return 1.0;
+    }
+    if local_frame <= points[0].time_frames {
+        return points[0].value;
+    }
+    if local_frame >= points.last().unwrap().time_frames {
+        return points.last().unwrap().value;
+    }
+    for pair in points.windows(2) {
+        let a = &pair[0];
+        let b = &pair[1];
+        if local_frame >= a.time_frames && local_frame <= b.time_frames {
+            let t = (local_frame - a.time_frames) as f64 / (b.time_frames - a.time_frames) as f64;
+            return a.value + (b.value - a.value) * t as f32;
+        }
+    }
+    1.0
+}
+
 fn compute_fade_gain(local_frame: usize, clip_len: usize, fade_in: usize, fade_out: usize) -> f32 {
     if fade_in > 0 && local_frame < fade_in {
         return (local_frame as f32 / fade_in as f32).min(1.0);
@@ -90,33 +113,47 @@ pub fn process_track(
             continue;
         }
 
-        for i in 0..frames {
-            let playhead = pos + i;
-            if playhead < clip_start || playhead >= clip_end {
-                continue;
-            }
-            let local_frame = (playhead - clip_start) + clip_off;
-            let src_idx = local_frame * clip.channels as usize;
-            if src_idx >= clip.audio_data.len() {
+        let overlap_start = pos.max(clip_start);
+        let overlap_end = (pos + frames).min(clip_end);
+        let overlap_len = overlap_end.saturating_sub(overlap_start);
+        if overlap_len == 0 {
+            continue;
+        }
+
+        let buf_offset = overlap_start - pos;
+        let local_start = (overlap_start - clip_start) + clip_off;
+
+        let channels = clip.channels as usize;
+        let data_len = clip.audio_data.len();
+
+        for i in 0..overlap_len {
+            let local_frame = local_start + i;
+            let src_idx = local_frame * channels;
+            let buf_idx = buf_offset + i;
+
+            if src_idx >= data_len {
                 break;
             }
-            let mono = if clip.channels >= 2 {
-                if src_idx + 1 >= clip.audio_data.len() {
-                    clip.audio_data[src_idx]
+
+            let (l, r) = if channels >= 2 {
+                if src_idx + 1 >= data_len {
+                    (clip.audio_data[src_idx] * 0.5, clip.audio_data[src_idx] * 0.5)
                 } else {
-                    (clip.audio_data[src_idx] + clip.audio_data[src_idx + 1]) * 0.5
+                    (clip.audio_data[src_idx] * 0.5, clip.audio_data[src_idx + 1] * 0.5)
                 }
             } else {
-                clip.audio_data[src_idx]
+                (clip.audio_data[src_idx], clip.audio_data[src_idx])
             };
-            let fade_gain = compute_fade_gain(local_frame, clip_len, f_in, f_out);
-            let sample = mono * total * fade_gain;
-            mix_l[i] += sample * pan_l;
-            mix_r[i] += sample * pan_r;
 
-            let raw = mono * clip_gain * fade_gain;
-            pre_l[i] += raw;
-            pre_r[i] += raw;
+            let fade_gain = compute_fade_gain(local_frame, clip_len, f_in, f_out);
+            let env_gain = eval_gain_envelope(local_frame as u64, &clip.gain_points);
+            let fade_sample = fade_gain * total * env_gain;
+            mix_l[buf_idx] += l * pan_l * fade_sample;
+            mix_r[buf_idx] += r * pan_r * fade_sample;
+
+            let raw_fade = fade_gain * clip_gain;
+            pre_l[buf_idx] += l * 2.0 * raw_fade;
+            pre_r[buf_idx] += r * 2.0 * raw_fade;
         }
     }
 
@@ -140,6 +177,8 @@ pub fn process_track(
                 EffectKind::Clap(adapter) => {
                     if let Ok(mut a) = adapter.try_lock() {
                         a.process(&mut mix_l, &mut mix_r, sample_rate);
+                    } else {
+                        adapter.lock().ok();
                     }
                 }
             }

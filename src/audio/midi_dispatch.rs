@@ -146,35 +146,33 @@ pub fn dispatch_midi(
                 let events = buf.as_input();
                 a.process_with_events(mix_l, mix_r, sample_rate, &events);
 
-                for s in mix_l.iter_mut() {
-                    if !s.is_finite() {
-                        *s = 0.0;
+                let mut has_output = false;
+                for (l, r) in mix_l[..frames].iter_mut().zip(mix_r[..frames].iter_mut()) {
+                    if !l.is_finite() {
+                        *l = 0.0;
                     } else {
-                        *s = s.clamp(-10.0, 10.0);
+                        *l = l.clamp(-10.0, 10.0);
                     }
-                }
-                for s in mix_r.iter_mut() {
-                    if !s.is_finite() {
-                        *s = 0.0;
+                    if !r.is_finite() {
+                        *r = 0.0;
                     } else {
-                        *s = s.clamp(-10.0, 10.0);
+                        *r = r.clamp(-10.0, 10.0);
                     }
+                    if !has_output {
+                        has_output = l.abs() > 1e-10 || r.abs() > 1e-10;
+                    }
+                    *l *= track_vol;
+                    *r *= track_vol;
                 }
-
-                let has_output =
-                    mix_l.iter().any(|&s| s.abs() > 1e-10) || mix_r.iter().any(|&s| s.abs() > 1e-10);
                 if n_events > 0 && !has_output {
                     tracing::warn!(
                         "instrument process_with_events produced zero output after {} events",
                         n_events
                     );
                 }
-
-                for i in 0..frames {
-                    mix_l[i] *= track_vol;
-                    mix_r[i] *= track_vol;
-                }
             });
+        } else {
+            adapter.lock().ok();
         }
     }
 
