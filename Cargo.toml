@@ -2,7 +2,7 @@
 name = "hdaw"
 version = "0.9.0"
 edition = "2021"
-description = "Hap's Digital Audio Workstation"
+description = "Holofonic Digital Audio Workstation"
 
 [dependencies]
 eframe = "0.30"
