@@ -116,7 +116,7 @@ impl EffectInstance {
             EffectKind::BuiltIn(effect) => effect.set_parameter(id, value),
             EffectKind::Clap(adapter) => {
                 if let Ok(a) = adapter.try_lock() {
-                    a.try_set_parameter(id, value);
+                    a.apply_parameter(id, value);
                 }
             }
         }

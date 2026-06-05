@@ -83,14 +83,21 @@ pub fn draw(
                 if r > l {
                     painter.rect_filled(loop_rect, 0.0, Color32::from_rgba_premultiplied(0x44, 0x88, 0xcc, 80));
                 }
-                let handle_size = 8.0;
-                if in_x >= timeline_origin_x {
-                    painter.line_segment([pos2(in_x, rect.top()), pos2(in_x + handle_size, rect.top() + handle_size)], Stroke::new(2.0, Color32::from_rgb(0x66, 0xbb, 0xff)));
-                    painter.line_segment([pos2(in_x, rect.top() + RULER_HEIGHT), pos2(in_x + handle_size, rect.top() + RULER_HEIGHT - handle_size)], Stroke::new(2.0, Color32::from_rgb(0x66, 0xbb, 0xff)));
+                let handle_size = 6.0;
+                let lc = Color32::from_rgb(0x66, 0xbb, 0xff);
+                // Loop start marker: "<" inside the loop (to the right of in_x)
+                if in_x >= timeline_origin_x && in_x < rect.right() {
+                    let cx = in_x + handle_size;
+                    let mid_y = rect.top() + RULER_HEIGHT / 2.0;
+                    painter.line_segment([pos2(cx, rect.top() + 2.0), pos2(in_x, mid_y)], Stroke::new(2.0, lc));
+                    painter.line_segment([pos2(in_x, mid_y), pos2(cx, rect.top() + RULER_HEIGHT - 2.0)], Stroke::new(2.0, lc));
                 }
-                if out_x <= rect.right() {
-                    painter.line_segment([pos2(out_x, rect.top()), pos2(out_x - handle_size, rect.top() + handle_size)], Stroke::new(2.0, Color32::from_rgb(0x66, 0xbb, 0xff)));
-                    painter.line_segment([pos2(out_x, rect.top() + RULER_HEIGHT), pos2(out_x - handle_size, rect.top() + RULER_HEIGHT - handle_size)], Stroke::new(2.0, Color32::from_rgb(0x66, 0xbb, 0xff)));
+                // Loop end marker: ">" inside the loop (to the left of out_x)
+                if out_x > timeline_origin_x && out_x <= rect.right() {
+                    let cx = out_x - handle_size;
+                    let mid_y = rect.top() + RULER_HEIGHT / 2.0;
+                    painter.line_segment([pos2(out_x, rect.top() + 2.0), pos2(cx, mid_y)], Stroke::new(2.0, lc));
+                    painter.line_segment([pos2(cx, mid_y), pos2(out_x, rect.top() + RULER_HEIGHT - 2.0)], Stroke::new(2.0, lc));
                 }
             }
         }

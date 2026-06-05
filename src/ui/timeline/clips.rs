@@ -187,6 +187,18 @@ fn draw_audio(
         }
     }
 
+    // Stretch ratio indicator
+    if (clip.stretch_ratio - 1.0).abs() > 0.01 && available_w > 30.0 {
+        let label = format!("x{:.2}", clip.stretch_ratio);
+        painter.text(
+            pos2(clip_rect.right() - 4.0, clip_rect.top() + 2.0),
+            egui::Align2::RIGHT_TOP,
+            label,
+            egui::FontId::proportional(CLIP_LABEL_SIZE),
+            Color32::from_rgb(0xff, 0xcc, 0x44),
+        );
+    }
+
     if available_w > 40.0 {
         let small_font = egui::FontId::proportional(CLIP_LABEL_SIZE);
         painter.text(
@@ -377,6 +389,10 @@ pub fn handle_interaction(
                         }
                     }
                 }
+                DragMode::Stretch => {
+                    let new_len = (drag.original_length_frames as i64 + delta_frames).max(1) as u64;
+                    app.update_clip_trim(drag.track_index, drag.clip_id, None, None, Some(new_len));
+                }
                 DragMode::TrimLeft => {
                     let new_off = (drag.original_offset_frames as i64 + delta_frames).max(0) as u64;
                     let new_len = drag.original_length_frames.saturating_sub(
@@ -497,7 +513,9 @@ pub fn handle_interaction(
                         return;
                     }
 
+                    let alt = response.ctx.input(|i| i.modifiers.alt);
                     if (local_x - left_pixel).abs() < edge {
+                        let mode = if alt { DragMode::Stretch } else { DragMode::TrimLeft };
                         app.timeline_state.drag_state = Some(DragState {
                             clip_id,
                             track_index: track_idx,
@@ -508,11 +526,12 @@ pub fn handle_interaction(
                             original_length_frames: length_frames,
                             original_fade_in: 0,
                             original_fade_out: 0,
-                            mode: DragMode::TrimLeft,
+                            mode,
                         });
                         return;
                     }
                     if (local_x - right_pixel).abs() < edge {
+                        let mode = if alt { DragMode::Stretch } else { DragMode::TrimRight };
                         app.timeline_state.drag_state = Some(DragState {
                             clip_id,
                             track_index: track_idx,
@@ -523,7 +542,7 @@ pub fn handle_interaction(
                             original_length_frames: length_frames,
                             original_fade_in: 0,
                             original_fade_out: 0,
-                            mode: DragMode::TrimRight,
+                            mode,
                         });
                         return;
                     }

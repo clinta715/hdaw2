@@ -26,6 +26,8 @@ pub struct AudioClip {
     pub fade_out_frames: u64,
     #[serde(default)]
     pub gain_points: Vec<GainPoint>,
+    #[serde(default)]
+    pub stretch_ratio: f32,
     pub source_path: Option<PathBuf>,
     #[serde(skip)]
     pub buffer: Option<AudioBuffer>,
@@ -47,6 +49,7 @@ impl AudioClip {
             fade_in_frames: 0,
             fade_out_frames: 0,
             gain_points: Vec::new(),
+            stretch_ratio: 1.0,
             source_path: None,
             buffer: Some(buffer),
             waveform_peaks: Some(Arc::new(peaks)),
@@ -66,6 +69,7 @@ impl AudioClip {
             fade_in_frames: 0,
             fade_out_frames: 0,
             gain_points: Vec::new(),
+            stretch_ratio: 1.0,
             source_path: Some(source_path),
             buffer: Some(buffer),
             waveform_peaks: Some(Arc::new(peaks)),

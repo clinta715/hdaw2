@@ -1,6 +1,7 @@
 use crate::audio::clap_host::{HdawClapHost, HdawClapHostShared, make_host_info};
 use crate::audio::clap_instance::ClapPluginState;
 use crate::audio::effects::parameter::{ParamId, ParameterInfo};
+use crate::audio::param_ring::ParamRingBuffer;
 use clack_extensions::gui::{GuiApiType, PluginGui};
 use clack_extensions::note_ports::PluginNotePorts;
 use clack_extensions::params::{ParamInfoBuffer, PluginParams};
@@ -15,7 +16,7 @@ use clack_host::process::audio_buffers::{
 use std::cell::RefCell;
 use std::ffi::CString;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::Arc;
 
 thread_local! {
     static SCRATCH_IN_L: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
@@ -23,6 +24,7 @@ thread_local! {
     static SCRATCH_OUT_L: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
     static SCRATCH_OUT_R: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
     static COMBINED_EVENTS: RefCell<EventBuffer> = RefCell::new(EventBuffer::with_capacity(256));
+    static DRAINED: RefCell<Vec<crate::audio::param_ring::ParamChange>> = RefCell::new(Vec::new());
 }
 
 pub struct ClapEffectAdapter {
@@ -36,7 +38,7 @@ pub struct ClapEffectAdapter {
     pub has_note_input: bool,
     pub gui_supported: bool,
     gui_created: bool,
-    pending_params: Mutex<Vec<(u32, f64)>>,
+    ring_buffer: Arc<ParamRingBuffer>,
 }
 
 unsafe impl Send for ClapEffectAdapter {}
@@ -158,7 +160,7 @@ impl ClapEffectAdapter {
             has_note_input,
             gui_supported,
             gui_created: false,
-            pending_params: Mutex::new(Vec::new()),
+            ring_buffer: Arc::new(ParamRingBuffer::new(1024)),
         })
     }
 
@@ -178,27 +180,15 @@ impl ClapEffectAdapter {
         self.state.parameter_value(id)
     }
 
-    const PENDING_CAP: usize = 1024;
-
     pub fn set_parameter(&mut self, id: ParamId, value: f32) {
         self.state.set_parameter(id, value);
-        if let Ok(mut pending) = self.pending_params.lock() {
-            if pending.len() < Self::PENDING_CAP {
-                pending.push((id as u32, value as f64));
-            }
-        }
+        self.ring_buffer.push(id as u32, value as f64);
     }
 
-    /// Non-blocking variant for audio-thread use. Uses `try_lock` so it never
-    /// stalls the audio callback if the UI thread holds the lock. If the lock
-    /// is contended, the update is dropped — the next callback retries.
-    pub fn try_set_parameter(&self, id: ParamId, value: f32) {
+    /// Audio-thread method — applies param directly to state without pushing to ring.
+    /// Called from drain loop in process_inner while holding the adapter lock.
+    pub fn apply_parameter(&self, id: ParamId, value: f32) {
         self.state.set_parameter(id, value);
-        if let Ok(mut pending) = self.pending_params.try_lock() {
-            if pending.len() < Self::PENDING_CAP {
-                pending.push((id as u32, value as f64));
-            }
-        }
     }
 
     pub fn is_bypassed(&self) -> bool {
@@ -375,26 +365,25 @@ impl ClapEffectAdapter {
                 let mut combined = ceb.borrow_mut();
                 combined.clear();
 
-                // Copy all input events into combined buffer
                 for event in input_events.iter() {
                     combined.push(event);
                 }
 
-                // Add pending param changes
-                if let Ok(mut pending) = self.pending_params.try_lock() {
+                DRAINED.with(|d| {
+                    let mut drained = d.borrow_mut();
+                    self.ring_buffer.drain(&mut drained, 64);
                     let pckn = Pckn::new(0u8, 0u8, 0u8, 0u8);
-                    for &(id, value) in pending.iter() {
+                    for change in drained.iter() {
                         let ev = ParamValueEvent::new(
                             0,
-                            ClapId::from(id),
+                            ClapId::from(change.param_id),
                             pckn,
-                            value,
+                            change.value,
                             Cookie::default(),
                         );
                         combined.push(&ev);
                     }
-                    pending.clear();
-                }
+                });
 
                 combined.sort();
 

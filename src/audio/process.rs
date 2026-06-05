@@ -125,24 +125,43 @@ pub fn process_track(
 
         let channels = clip.channels as usize;
         let data_len = clip.audio_data.len();
+        let stretch = f32::from_bits(clip.stretch_ratio.load(Ordering::Acquire));
+        let use_stretch = (stretch - 1.0).abs() > 0.001;
 
         for i in 0..overlap_len {
             let local_frame = local_start + i;
-            let src_idx = local_frame * channels;
             let buf_idx = buf_offset + i;
 
-            if src_idx >= data_len {
-                break;
-            }
-
-            let (l, r) = if channels >= 2 {
-                if src_idx + 1 >= data_len {
-                    (clip.audio_data[src_idx] * 0.5, clip.audio_data[src_idx] * 0.5)
+            let (l, r) = if use_stretch {
+                let inv = 1.0 / stretch;
+                let src_frame = local_frame as f64 * inv as f64;
+                let sf = src_frame as usize;
+                let frac = src_frame - sf as f64;
+                let s0 = sf * channels;
+                let s1 = (sf + 1) * channels;
+                let l0 = if s0 < data_len { clip.audio_data[s0] } else { 0.0 };
+                let r0 = if channels >= 2 && s0 + 1 < data_len { clip.audio_data[s0 + 1] } else { l0 };
+                let l1 = if s1 < data_len { clip.audio_data[s1] } else { l0 };
+                let r1 = if channels >= 2 && s1 + 1 < data_len { clip.audio_data[s1 + 1] } else { r0 };
+                let ll = l0 as f64 + (l1 as f64 - l0 as f64) * frac;
+                let rr = r0 as f64 + (r1 as f64 - r0 as f64) * frac;
+                if channels >= 2 {
+                    (ll as f32 * 0.5, rr as f32 * 0.5)
                 } else {
-                    (clip.audio_data[src_idx] * 0.5, clip.audio_data[src_idx + 1] * 0.5)
+                    (ll as f32, rr as f32)
                 }
             } else {
-                (clip.audio_data[src_idx], clip.audio_data[src_idx])
+                let src_idx = local_frame * channels;
+                if src_idx >= data_len { break; }
+                if channels >= 2 {
+                    if src_idx + 1 >= data_len {
+                        (clip.audio_data[src_idx] * 0.5, clip.audio_data[src_idx] * 0.5)
+                    } else {
+                        (clip.audio_data[src_idx] * 0.5, clip.audio_data[src_idx + 1] * 0.5)
+                    }
+                } else {
+                    (clip.audio_data[src_idx], clip.audio_data[src_idx])
+                }
             };
 
             let fade_gain = compute_fade_gain(local_frame, clip_len, f_in, f_out);

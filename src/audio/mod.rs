@@ -8,6 +8,7 @@ pub mod effects;
 pub mod engine;
 pub mod midi_dispatch;
 pub mod mixer;
+pub mod param_ring;
 pub mod process;
 pub mod record;
 pub mod stream;

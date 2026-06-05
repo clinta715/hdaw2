@@ -126,6 +126,7 @@ pub enum DragMode {
     Move,
     TrimLeft,
     TrimRight,
+    Stretch,
     FadeIn,
     FadeOut,
 }

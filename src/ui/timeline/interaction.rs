@@ -68,6 +68,40 @@ pub fn handle_drag_end_snap(response: &Response, app: &mut HdawApp) {
                     }
                     return;
                 }
+                DragMode::Stretch => {
+                    // On stretch end, compute ratio and sync to both models
+                    if let Some(track) = app.project.tracks.get_mut(drag.track_index) {
+                        let new_len = track.clips.iter().find_map(|c| match c {
+                            crate::project::clip::ClipKind::Audio(a) if a.id == drag.clip_id => Some(a.length_frames),
+                            _ => None,
+                        });
+                        if let Some(nlen) = new_len {
+                            if old_len > 0 {
+                                let ratio = nlen as f32 / old_len as f32;
+                                let ratio = ratio.clamp(0.25, 4.0);
+                                if let Some(ClipKind::Audio(a)) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Audio(a) if a.id == drag.clip_id)) {
+                                    a.stretch_ratio = ratio;
+                                }
+                                if let Ok(mut tracks) = app.engine.tracks.lock() {
+                                    if let Some(handle) = tracks.get_mut(drag.track_index) {
+                                        if let Some(ch) = handle.clips.iter_mut().find(|c| c.clip_id == drag.clip_id) {
+                                            ch.stretch_ratio.store(ratio.to_bits(), Ordering::Release);
+                                        }
+                                    }
+                                }
+                                app.undo_service.push(crate::app::undo::UndoCommand::TrimClip {
+                                    track_index: drag.track_index,
+                                    clip_id: drag.clip_id,
+                                    old_offset: drag.original_offset_frames,
+                                    old_length: drag.original_length_frames,
+                                    new_offset: 0,
+                                    new_length: nlen,
+                                });
+                            }
+                        }
+                    }
+                    return;
+                }
                 _ => {}
             }
 
