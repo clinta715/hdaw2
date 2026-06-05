@@ -55,7 +55,7 @@ fn draw_master(ui: &mut egui::Ui, state: &mut MixerPanelState, initial_vol: f32)
 
         // Master meter
         {
-            let mh = ui.available_height().max(20.0).min(200.0);
+            let mh = ui.available_height().clamp(20.0, 200.0);
             let (master_rect, _) = ui.allocate_exact_size(egui::vec2(12.0, mh), egui::Sense::hover());
             draw_vu_meter(ui, master_rect, state.master_volume, false);
 
@@ -93,7 +93,7 @@ fn draw_channel(ui: &mut egui::Ui, index: usize, app: &mut crate::app::HdawApp, 
 
         // Track meter
         {
-            let meter_h = ui.available_height().max(20.0).min(200.0);
+            let meter_h = ui.available_height().clamp(20.0, 200.0);
             let (meter_rect, _) = ui.allocate_exact_size(egui::vec2(10.0, meter_h), egui::Sense::hover());
             draw_vu_meter(ui, meter_rect, peak, muted);
 

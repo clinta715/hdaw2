@@ -6,6 +6,7 @@ use egui::{pos2, vec2, Color32, Rect, Stroke};
 const RULER_FONT_SIZE: f32 = 10.0;
 const MARKER_FONT_SIZE: f32 = 9.0;
 
+#[allow(clippy::too_many_arguments)]
 pub fn draw(
     painter: &egui::Painter,
     rect: Rect,

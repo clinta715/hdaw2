@@ -76,7 +76,7 @@ pub fn render(ctx: &egui::Context, app: &mut HdawApp) {
         .show(ctx, |ui| {
             // Handle scroll and zoom — only when pointer is over this window
             let is_over = ui.input(|i| i.pointer.hover_pos())
-                .map_or(false, |p| ui.clip_rect().contains(p));
+                .is_some_and(|p| ui.clip_rect().contains(p));
             if is_over {
                 let mw_delta = ui.input(|i| i.raw_scroll_delta);
                 let modifiers = ui.input(|i| i.modifiers);
@@ -254,7 +254,7 @@ pub fn render(ctx: &egui::Context, app: &mut HdawApp) {
                     Color32::from_rgb(0x33, 0xcc, 0x33)
                 } else if !is_white_key(note) {
                     Color32::from_rgb(0x11, 0x11, 0x11) // Black keys
-                } else if note % 12 == 0 {
+                } else if note.is_multiple_of(12) {
                     Color32::from_rgb(0x3a, 0x3a, 0x3a) // C highlights
                 } else {
                     Color32::from_rgb(0xdd, 0xdd, 0xdd) // White keys
@@ -266,7 +266,7 @@ pub fn render(ctx: &egui::Context, app: &mut HdawApp) {
                     key_bg,
                 );
 
-                if is_white_key(note) || note % 12 == 0 {
+                if is_white_key(note) || note.is_multiple_of(12) {
                     let text_color = if is_note_on { Color32::WHITE } else if !is_white_key(note) { Color32::from_gray(180) } else { Color32::from_gray(40) };
                     painter.text(
                         pos2(note_names_x + 4.0, y + row_height / 2.0),

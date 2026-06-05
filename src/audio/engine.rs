@@ -39,6 +39,7 @@ impl AudioEngine {
             tracks: Arc::new(Mutex::new(Vec::new())),
             needs_rebuild: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             _stream: None,
+            #[allow(clippy::arc_with_non_send_sync)]
             recording: Arc::new(Mutex::new(None)),
         }
     }
@@ -173,7 +174,7 @@ impl AudioEngine {
     }
 
     pub fn is_recording(&self) -> bool {
-        self.recording.lock().ok().map_or(false, |r| r.is_some())
+        self.recording.lock().ok().is_some_and(|r| r.is_some())
     }
 
     pub fn shutdown(&mut self) {

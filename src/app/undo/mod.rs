@@ -218,3 +218,7 @@ impl UndoStack {
     pub fn can_undo(&self) -> bool { self.index > 0 }
     pub fn can_redo(&self) -> bool { self.index < self.stack.len() }
 }
+
+impl Default for UndoStack {
+    fn default() -> Self { Self::new() }
+}

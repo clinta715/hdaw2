@@ -73,9 +73,9 @@ pub fn handle_keyboard_input(app: &mut HdawApp, ctx: &egui::Context) {
         if input.consume_key(egui::Modifiers::NONE, Key::End) {
             let last = app.project.tracks.iter()
                 .flat_map(|t| t.clips.iter())
-                .filter_map(|c| match c {
-                    ClipKind::Audio(a) => Some(a.position_frames + a.length_frames),
-                    ClipKind::Midi(m) => Some(m.position_frames + m.length_frames),
+                .map(|c| match c {
+                    ClipKind::Audio(a) => a.position_frames + a.length_frames,
+                    ClipKind::Midi(m) => m.position_frames + m.length_frames,
                 })
                 .max().unwrap_or(0);
             app.seek_frame = last;
@@ -230,8 +230,8 @@ pub fn handle_pending_requests(app: &mut HdawApp, ctx: &egui::Context) {
 
             if let Ok(mut tracks_guard) = app.engine.tracks.lock() {
                 let samples = render_export(
-                    &mut *tracks_guard,
-                    &*app.engine.master_bus,
+                    &mut tracks_guard,
+                    &app.engine.master_bus,
                     sr,
                     start,
                     end,

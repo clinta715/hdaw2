@@ -244,10 +244,10 @@ pub fn render(app: &mut HdawApp, ctx: &Context) {
     }
 
     // 4. Intercept window close if unsaved changes
-    if ctx.input(|i| i.viewport().close_requested()) && app.confirm_unsaved.is_none() {
-        if app.has_unsaved_changes() {
-            app.confirm_unsaved = Some(UnsavedChangesAction::CloseApp);
-        }
+    if ctx.input(|i| i.viewport().close_requested()) && app.confirm_unsaved.is_none()
+        && app.has_unsaved_changes()
+    {
+        app.confirm_unsaved = Some(UnsavedChangesAction::CloseApp);
     }
 
     // 5. Unsaved changes confirmation dialog

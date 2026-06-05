@@ -121,6 +121,10 @@ impl ReverbEffect {
     }
 }
 
+impl Default for ReverbEffect {
+    fn default() -> Self { Self::new() }
+}
+
 impl Parameterizable for ReverbEffect {
     fn parameter_info(&self) -> &[ParameterInfo] { &self.info }
     fn parameter_value(&self, id: ParamId) -> f32 {

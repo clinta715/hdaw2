@@ -63,6 +63,7 @@ impl EffectInstance {
         }
     }
 
+    #[allow(clippy::mut_mutex_lock)]
     fn lock_clap_mut(&mut self) -> std::sync::MutexGuard<'_, ClapEffectAdapter> {
         match &mut self.kind {
             EffectKind::Clap(adapter) => adapter.lock().unwrap_or_else(|e| e.into_inner()),

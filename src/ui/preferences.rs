@@ -2,33 +2,23 @@ use crate::app::HdawApp;
 use egui::{CollapsingHeader, ComboBox, Context, RichText, Vec2};
 use std::path::PathBuf;
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub enum BufferSizePref {
     Small,
+    #[default]
     Default,
     Large,
 }
 
-impl Default for BufferSizePref {
-    fn default() -> Self {
-        Self::Default
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum GridDivision {
+    #[default]
     Adaptive,
     Bar,
     Half,
     Quarter,
     Eighth,
     Sixteenth,
-}
-
-impl Default for GridDivision {
-    fn default() -> Self {
-        Self::Adaptive
-    }
 }
 
 impl GridDivision {

@@ -50,12 +50,10 @@ pub fn parse_midi_file(path: &str, bpm: f64, sample_rate: u32) -> Result<Vec<Imp
 
 fn find_track_name(track: &midly::Track) -> Option<String> {
     let first = track.first()?;
-    if let midly::TrackEventKind::Meta(meta) = &first.kind {
-        if let midly::MetaMessage::TrackName(name) = meta {
-            return Some(
-                std::str::from_utf8(name).unwrap_or("").to_string(),
-            );
-        }
+    if let midly::TrackEventKind::Meta(midly::MetaMessage::TrackName(name)) = &first.kind {
+        return Some(
+            std::str::from_utf8(name).unwrap_or("").to_string(),
+        );
     }
     None
 }
@@ -75,8 +73,7 @@ fn extract_notes(
         let delta: u64 = ev.delta.as_int() as u64;
         abs_tick = abs_tick.checked_add(delta).ok_or("overflow in MIDI tick count")?;
 
-        match &ev.kind {
-            midly::TrackEventKind::Midi { channel: _, message } => {
+        if let midly::TrackEventKind::Midi { channel: _, message } = &ev.kind {
                 match message {
                     midly::MidiMessage::NoteOn { key, vel } => {
                         let pitch = key.as_int();
@@ -136,8 +133,6 @@ fn extract_notes(
                     _ => {}
                 }
             }
-            _ => {}
-        }
     }
 
     // Close any remaining active notes at the end of track.

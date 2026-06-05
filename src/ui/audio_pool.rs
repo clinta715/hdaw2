@@ -53,14 +53,14 @@ fn draw_pool_panel(ui: &mut egui::Ui, state: &mut AudioPoolPanelState, app: &mut
     }
 
     ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        let pool_clips: Vec<(uuid::Uuid, String, f64)> = app.project.audio_pool.iter().filter_map(|p| {
+        let pool_clips: Vec<(uuid::Uuid, String, f64)> = app.project.audio_pool.iter().map(|p| {
             let secs = match &p.clip {
                 ClipKind::Audio(a) => a.buffer.as_ref()
                     .map(|b| b.frames() as f64 / b.sample_rate() as f64)
                     .unwrap_or(0.0),
                 ClipKind::Midi(_) => 0.0,
             };
-            Some((p.id, p.name.clone(), secs))
+            (p.id, p.name.clone(), secs)
         }).collect();
         let _ = ();
 

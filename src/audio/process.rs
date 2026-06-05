@@ -197,6 +197,7 @@ pub fn process_track(
                     if let Ok(mut a) = adapter.try_lock() {
                         a.process(&mut mix_l, &mut mix_r, sample_rate);
                     } else {
+                        #[allow(clippy::mut_mutex_lock)]
                         adapter.lock().ok();
                     }
                 }

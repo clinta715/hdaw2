@@ -54,7 +54,7 @@ impl HdawApp {
                 let pos = tracks[from].clips.iter().position(|c| c.clip_id == clip_id);
                 pos.map(|p| tracks[from].clips.remove(p))
             } else { None };
-            if let Some(mut ch) = clip_handle {
+            if let Some(ch) = clip_handle {
                 ch.set_position(position);
                 if to < tracks.len() {
                     tracks[to].clips.push(ch);
@@ -230,7 +230,7 @@ impl HdawApp {
     }
 
     pub fn add_instrument_track(&mut self, desc: &crate::audio::clap_scanner::PluginDescriptor) {
-        let name = format!("{}", desc.name);
+        let name = desc.name.to_string();
         let sr = self.engine.transport.sample_rate();
         let adapter = match crate::audio::clap_effect::ClapEffectAdapter::new_instance(&desc.id, &desc.path, sr) {
             Ok(a) => a,
@@ -976,14 +976,14 @@ impl HdawApp {
                 let channels = a.buffer.as_ref().map(|buf| buf.channels()).unwrap_or(2);
                 // Calculate merged position and length
                 let pos = a.position_frames.min(b.position_frames);
-                let end_a = a.position_frames + a.length_frames;
+                let _end_a = a.position_frames + a.length_frames;
                 let end_b = b.position_frames + b.length_frames;
                 let len = end_b - pos;
                 // Build merged buffer by sampling from each clip's region
                 let total_samples = len as usize * channels as usize;
                 let mut merged_samples = vec![0.0f32; total_samples];
 
-                let mut fill_clip = |clip: &crate::project::clip::AudioClip, start_offset: u64| {
+                let mut fill_clip = |clip: &crate::project::clip::AudioClip, _start_offset: u64| {
                     if let Some(ref buf) = clip.buffer {
                         let samples = buf.samples();
                         let ch = buf.channels() as usize;
@@ -1016,13 +1016,13 @@ impl HdawApp {
                 let len = end_b - pos;
                 let mut merged_notes: Vec<crate::project::midi_note::MidiNote> = a.notes.iter().map(|n| {
                     let mut nn = n.clone();
-                    nn.start_frame = nn.start_frame - (a.position_frames - pos);
+                    nn.start_frame -= a.position_frames - pos;
                     nn
                 }).collect();
                 let offset_b = b.position_frames - pos;
                 merged_notes.extend(b.notes.iter().map(|n| {
                     let mut nn = n.clone();
-                    nn.start_frame = nn.start_frame + offset_b;
+                    nn.start_frame += offset_b;
                     nn
                 }));
                 let m = crate::project::midi_clip::MidiClip {
@@ -1164,7 +1164,7 @@ impl HdawApp {
 
         if let Some(selected) = self.timeline_state.selected_clip_id {
             let mut found = false;
-            for (_ti, track) in self.project.tracks.iter().enumerate() {
+            for track in self.project.tracks.iter() {
                 if track.clips.iter().any(|c| match c {
                     ClipKind::Audio(a) => a.id == selected,
                     ClipKind::Midi(m) => m.id == selected,

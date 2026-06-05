@@ -62,25 +62,26 @@ pub(super) fn draw(ui: &mut egui::Ui, fx: &FxData, sample_rate: u32) {
         biquad::BiquadType::HighShelf,
     ];
 
-    let pts: Vec<Pos2> = (0..=num_points).filter_map(|i| {
+    let pts: Vec<Pos2> = (0..=num_points).map(|i| {
         let t = i as f32 / num_points as f32;
-        let freq_hz = freq_min * ((freq_max / freq_min) as f32).powf(t);
+        let ratio: f32 = freq_max / freq_min;
+        let freq_hz = freq_min * ratio.powf(t);
         let sr = sample_rate as f32;
         let mut total_db = 0.0;
 
-        for band in 0..4 {
+        for (band, btype) in btypes.iter().enumerate() {
             let fi = band * 3;
             let freq = fx.params.get(fi).map(|p| p.value).unwrap_or(80.0);
             let gain = fx.params.get(fi + 1).map(|p| p.value).unwrap_or(0.0);
             let q = fx.params.get(fi + 2).map(|p| p.value).unwrap_or(0.7).max(0.1);
-            let c = biquad::compute_coeffs(&btypes[band], freq, gain, q, sr);
+            let c = biquad::compute_coeffs(btype, freq, gain, q, sr);
             total_db += biquad::frequency_response(&c, freq_hz, sr);
         }
 
         let db_clamped = total_db.clamp(db_min, db_max);
         let x = graph.left() + t * graph.width();
         let y = graph.bottom() - ((db_clamped - db_min) / (db_max - db_min)) * graph.height();
-        Some(pos2(x, y))
+        pos2(x, y)
     }).collect();
 
     if pts.len() > 1 {
@@ -92,7 +93,7 @@ pub(super) fn draw(ui: &mut egui::Ui, fx: &FxData, sample_rate: u32) {
         let fi = band * 3;
         let freq = fx.params.get(fi).map(|p| p.value).unwrap_or(80.0);
         let t = (freq / freq_min).log10() / (freq_max / freq_min).log10();
-        let x = graph.left() + t as f32 * graph.width();
+        let x = graph.left() + t * graph.width();
         painter.line_segment(
             [pos2(x, graph.top()), pos2(x, graph.bottom())],
             Stroke::new(1.0, Color32::from_rgba_premultiplied(0x88, 0x88, 0x44, 0x40)),

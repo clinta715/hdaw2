@@ -272,7 +272,7 @@ fn handle_track_context_menu(ui: &Ui, app: &mut HdawApp) {
     let mut close = false;
 
     let has_instrument = if let Ok(tracks) = app.engine.tracks.lock() {
-        tracks.get(track_idx).map_or(false, |t| t.fx_chain.iter().any(|e| e.has_note_input))
+        tracks.get(track_idx).is_some_and(|t| t.fx_chain.iter().any(|e| e.has_note_input))
     } else {
         false
     };
@@ -354,7 +354,7 @@ fn handle_track_context_menu(ui: &Ui, app: &mut HdawApp) {
                 let engine = &app.engine;
                 let has_lane = |eid: Option<uuid::Uuid>, pid: u32| -> bool {
                     if let Ok(tracks) = engine.tracks.lock() {
-                        tracks.get(track_idx).map_or(false, |t| {
+                        tracks.get(track_idx).is_some_and(|t| {
                             t.automation_lanes.iter().any(|l| l.effect_instance_id == eid && l.param_id == pid)
                         })
                     } else { false }
@@ -475,51 +475,49 @@ fn handle_clip_context_menu(ui: &Ui, app: &mut HdawApp) {
                 }
                 close = true;
             }
-            if has_clipboard {
-                if ui.button("Paste").clicked() {
-                    if let Some(c) = app.clipboard.clone() {
-                        let new_id = uuid::Uuid::new_v4();
-                        match &c {
-                            crate::project::clip::ClipKind::Audio(a) => {
-                                let mut new = a.clone();
-                                new.id = new_id;
-                                new.position_frames = app.engine.transport.position_frames();
-                                if let Some(track) = app.project.tracks.get_mut(track_idx) {
-                                    track.add_clip(crate::project::clip::ClipKind::Audio(new));
-                                }
-                                if let Ok(mut tracks) = app.engine.tracks.lock() {
-                                    if let Some(handle) = tracks.get_mut(track_idx) {
-                                        let sr = app.engine.transport.sample_rate();
-                                        let ch = crate::project::clip_handle::ClipHandle::new(
-                                            new_id, (**a.buffer.as_ref().map(|b| b.samples()).unwrap()).clone(),
-                                            a.buffer.as_ref().map(|b| b.channels()).unwrap_or(0),
-                                            a.buffer.as_ref().map(|b| b.sample_rate()).unwrap_or(sr),
-                                        );
-                                        ch.set_position(app.engine.transport.position_frames());
-                                        handle.add_clip(ch);
-                                    }
+            if has_clipboard && ui.button("Paste").clicked() {
+                if let Some(c) = app.clipboard.clone() {
+                    let new_id = uuid::Uuid::new_v4();
+                    match &c {
+                        crate::project::clip::ClipKind::Audio(a) => {
+                            let mut new = a.clone();
+                            new.id = new_id;
+                            new.position_frames = app.engine.transport.position_frames();
+                            if let Some(track) = app.project.tracks.get_mut(track_idx) {
+                                track.add_clip(crate::project::clip::ClipKind::Audio(new));
+                            }
+                            if let Ok(mut tracks) = app.engine.tracks.lock() {
+                                if let Some(handle) = tracks.get_mut(track_idx) {
+                                    let sr = app.engine.transport.sample_rate();
+                                    let ch = crate::project::clip_handle::ClipHandle::new(
+                                        new_id, (**a.buffer.as_ref().map(|b| b.samples()).unwrap()).clone(),
+                                        a.buffer.as_ref().map(|b| b.channels()).unwrap_or(0),
+                                        a.buffer.as_ref().map(|b| b.sample_rate()).unwrap_or(sr),
+                                    );
+                                    ch.set_position(app.engine.transport.position_frames());
+                                    handle.add_clip(ch);
                                 }
                             }
-                            crate::project::clip::ClipKind::Midi(m) => {
-                                let mut new = m.clone();
-                                new.id = new_id;
-                                new.position_frames = app.engine.transport.position_frames();
-                                if let Some(track) = app.project.tracks.get_mut(track_idx) {
-                                    track.add_clip(crate::project::clip::ClipKind::Midi(new));
-                                }
-                                if let Ok(mut tracks) = app.engine.tracks.lock() {
-                                    if let Some(handle) = tracks.get_mut(track_idx) {
-                                        let sr = app.engine.transport.sample_rate();
-                                        let ch = crate::project::clip_handle::ClipHandle::new_midi(new_id, m.notes.clone(), m.length_frames, sr);
-                                        ch.set_position(app.engine.transport.position_frames());
-                                        handle.add_clip(ch);
-                                    }
+                        }
+                        crate::project::clip::ClipKind::Midi(m) => {
+                            let mut new = m.clone();
+                            new.id = new_id;
+                            new.position_frames = app.engine.transport.position_frames();
+                            if let Some(track) = app.project.tracks.get_mut(track_idx) {
+                                track.add_clip(crate::project::clip::ClipKind::Midi(new));
+                            }
+                            if let Ok(mut tracks) = app.engine.tracks.lock() {
+                                if let Some(handle) = tracks.get_mut(track_idx) {
+                                    let sr = app.engine.transport.sample_rate();
+                                    let ch = crate::project::clip_handle::ClipHandle::new_midi(new_id, m.notes.clone(), m.length_frames, sr);
+                                    ch.set_position(app.engine.transport.position_frames());
+                                    handle.add_clip(ch);
                                 }
                             }
                         }
                     }
-                    close = true;
                 }
+                close = true;
             }
             ui.separator();
             if ui.button("Duplicate").clicked() {
@@ -529,9 +527,9 @@ fn handle_clip_context_menu(ui: &Ui, app: &mut HdawApp) {
             if ui.button("Glue").clicked() {
                 // Find adjacent clip after this one
                 if let Some(track) = app.project.tracks.get(track_idx) {
-                    let mut clips: Vec<(uuid::Uuid, u64)> = track.clips.iter().filter_map(|c| match c {
-                        crate::project::clip::ClipKind::Audio(a) => Some((a.id, a.position_frames)),
-                        crate::project::clip::ClipKind::Midi(m) => Some((m.id, m.position_frames)),
+                    let mut clips: Vec<(uuid::Uuid, u64)> = track.clips.iter().map(|c| match c {
+                        crate::project::clip::ClipKind::Audio(a) => (a.id, a.position_frames),
+                        crate::project::clip::ClipKind::Midi(m) => (m.id, m.position_frames),
                     }).collect();
                     clips.sort_by_key(|c| c.1);
                     let pos = clips.iter().position(|c| c.0 == clip_id);
@@ -572,7 +570,7 @@ fn handle_clip_context_menu(ui: &Ui, app: &mut HdawApp) {
     }
 
     // Rename dialog
-    if app.clip_rename_text.len() > 0 && app.timeline_state.clip_context_menu.is_some() {
+    if !app.clip_rename_text.is_empty() && app.timeline_state.clip_context_menu.is_some() {
         let mut rename_close = false;
         egui::Window::new("Rename Clip")
             .collapsible(false)
@@ -627,7 +625,7 @@ fn handle_clip_context_menu(ui: &Ui, app: &mut HdawApp) {
 }
 
 fn handle_ruler_context_menu(ui: &Ui, app: &mut HdawApp) {
-    let sr = app.engine.transport.sample_rate();
+    let _sr = app.engine.transport.sample_rate();
     let ctx_menu = match app.timeline_state.ruler_context_menu {
         Some(ref cm) => cm.frame,
         None => return,
@@ -677,7 +675,7 @@ fn handle_ruler_context_menu(ui: &Ui, app: &mut HdawApp) {
 
 fn handle_zoom_and_scroll(ui: &Ui, response: &Response, rect: &Rect, app: &mut HdawApp, header_width: f32) {
     let is_over = ui.input(|i| i.pointer.hover_pos())
-        .map_or(false, |p| p.x > rect.left() + header_width && rect.contains(p));
+        .is_some_and(|p| p.x > rect.left() + header_width && rect.contains(p));
     if !is_over { return; }
     let mw_delta = ui.input(|i| i.raw_scroll_delta);
     if mw_delta.y != 0.0 {
@@ -713,6 +711,7 @@ fn clamp_scroll_y(rect: &Rect, app: &mut HdawApp, track_height: f32) {
         .max(-max_scroll);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_grid_lines(painter: &egui::Painter, rect: &Rect, state: &TimelineState, header_width: f32, bpm: f64, prefs: &crate::ui::preferences::PreferencesState, tempo_events: &[crate::project::tempo_event::TempoEvent], sample_rate: u32) {
     if !state.snap_enabled { return; }
     let pps = state.pixels_per_second;

@@ -49,6 +49,10 @@ impl PhaserEffect {
     }
 }
 
+impl Default for PhaserEffect {
+    fn default() -> Self { Self::new() }
+}
+
 impl Parameterizable for PhaserEffect {
     fn parameter_info(&self) -> &[ParameterInfo] { &self.info }
     fn parameter_value(&self, id: ParamId) -> f32 {
@@ -100,8 +104,8 @@ impl DspEffect for PhaserEffect {
             fb_l = x_l;
             fb_r = x_r;
 
-            input_l[i] = input_l[i] + x_l;
-            input_r[i] = input_r[i] + x_r;
+            input_l[i] += x_l;
+            input_r[i] += x_r;
 
             self.phase += rate as f64 / self.sample_rate as f64;
             if self.phase >= 1.0 { self.phase -= 1.0; }

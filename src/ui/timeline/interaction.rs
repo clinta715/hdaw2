@@ -233,17 +233,18 @@ pub fn handle_loop_interaction(response: &Response, ui: &Ui, rect: &Rect, sr: u3
         let in_hit = (pos.x - loop_in_x).abs() <= hit_margin && pos.y <= rect.top() + RULER_HEIGHT;
         let out_hit = (pos.x - loop_out_x).abs() <= hit_margin && pos.y <= rect.top() + RULER_HEIGHT;
 
-        if !app.timeline_state.loop_drag.is_some() {
-            if response.clicked_by(egui::PointerButton::Primary) && (in_hit || out_hit) {
-                let handle = if in_hit { LoopHandle::In } else { LoopHandle::Out };
-                let original = if in_hit { loop_in } else { loop_out };
-                app.timeline_state.loop_drag = Some(LoopDragState {
-                    handle,
-                    drag_start_x: pos.x as f64,
-                    original_frame: original,
-                });
-                return;
-            }
+        if app.timeline_state.loop_drag.is_none()
+            && response.clicked_by(egui::PointerButton::Primary)
+            && (in_hit || out_hit)
+        {
+            let handle = if in_hit { LoopHandle::In } else { LoopHandle::Out };
+            let original = if in_hit { loop_in } else { loop_out };
+            app.timeline_state.loop_drag = Some(LoopDragState {
+                handle,
+                drag_start_x: pos.x as f64,
+                original_frame: original,
+            });
+            return;
         }
     }
 

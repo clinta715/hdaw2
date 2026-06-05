@@ -37,6 +37,10 @@ impl CompressorEffect {
     }
 }
 
+impl Default for CompressorEffect {
+    fn default() -> Self { Self::new() }
+}
+
 impl Parameterizable for CompressorEffect {
     fn parameter_info(&self) -> &[ParameterInfo] { &self.info }
     fn parameter_value(&self, id: ParamId) -> f32 {

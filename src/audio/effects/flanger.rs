@@ -34,6 +34,10 @@ impl FlangerEffect {
     }
 }
 
+impl Default for FlangerEffect {
+    fn default() -> Self { Self::new() }
+}
+
 impl Parameterizable for FlangerEffect {
     fn parameter_info(&self) -> &[ParameterInfo] { &self.info }
     fn parameter_value(&self, id: ParamId) -> f32 {
@@ -78,8 +82,8 @@ impl DspEffect for FlangerEffect {
             self.buffer_r[self.write_pos] = input_r[i] + delayed_r * feedback;
             self.write_pos = (self.write_pos + 1) % self.buffer_l.len();
 
-            input_l[i] = input_l[i] + delayed_l;
-            input_r[i] = input_r[i] + delayed_r;
+            input_l[i] += delayed_l;
+            input_r[i] += delayed_r;
 
             self.phase += rate as f64 / sr;
             if self.phase >= 1.0 { self.phase -= 1.0; }

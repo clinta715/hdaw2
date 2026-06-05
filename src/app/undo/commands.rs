@@ -203,7 +203,7 @@ pub fn apply_undo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoC
             if new_track_index < tracks.len() {
                 let pos = tracks[new_track_index].clips.iter().position(|c| c.clip_id == clip_id);
                 if let Some(p) = pos {
-                    let mut ch = tracks[new_track_index].clips.remove(p);
+                    let ch = tracks[new_track_index].clips.remove(p);
                     ch.set_position(old_position);
                     if old_track_index < tracks.len() {
                         tracks[old_track_index].clips.push(ch);
@@ -511,7 +511,7 @@ pub fn apply_redo(project: &mut Project, tracks: &mut [TrackHandle], cmd: &UndoC
             if old_track_index < tracks.len() {
                 let pos = tracks[old_track_index].clips.iter().position(|c| c.clip_id == clip_id);
                 if let Some(p) = pos {
-                    let mut ch = tracks[old_track_index].clips.remove(p);
+                    let ch = tracks[old_track_index].clips.remove(p);
                     ch.set_position(new_position);
                     if new_track_index < tracks.len() {
                         tracks[new_track_index].clips.push(ch);

@@ -4,14 +4,10 @@ const BTN_SIZE: egui::Vec2 = egui::vec2(30.0, 24.0);
 const RECORD_FONT_SIZE: f32 = 14.0;
 const TIME_FONT_SIZE: f32 = 16.0;
 
+#[derive(Default)]
 pub struct ToolbarState;
 
-impl Default for ToolbarState {
-    fn default() -> Self {
-        Self
-    }
-}
-
+#[derive(Default)]
 pub struct ToolbarAction {
     pub play_clicked: bool,
     pub pause_clicked: bool,
@@ -43,41 +39,7 @@ pub struct ToolbarAction {
     pub shortcuts_clicked: bool,
 }
 
-impl Default for ToolbarAction {
-    fn default() -> Self {
-        Self {
-            play_clicked: false,
-            pause_clicked: false,
-            stop_clicked: false,
-            import_clicked: false,
-            midi_import_clicked: false,
-            fx_clicked: false,
-            new_clicked: false,
-            save_clicked: false,
-            save_as_clicked: false,
-            open_clicked: false,
-            open_file: None,
-            snap_clicked: false,
-            undo_clicked: false,
-            redo_clicked: false,
-            loop_clicked: false,
-            record_clicked: false,
-            add_track_clicked: false,
-            delete_track_clicked: false,
-            add_instrument_clicked: false,
-            mixer_clicked: false,
-            add_group_clicked: false,
-            add_return_clicked: false,
-            pool_clicked: false,
-            preferences_clicked: false,
-            metronome_clicked: false,
-            export_clicked: false,
-            about_clicked: false,
-            shortcuts_clicked: false,
-        }
-    }
-}
-
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     ctx: &Context,
     is_playing: bool,
@@ -176,11 +138,9 @@ pub fn render(
                     action.add_track_clicked = true;
                     ui.close_menu();
                 }
-                if has_instruments {
-                    if ui.button("Add Instrument...").clicked() {
-                        action.add_instrument_clicked = true;
-                        ui.close_menu();
-                    }
+                if has_instruments && ui.button("Add Instrument...").clicked() {
+                    action.add_instrument_clicked = true;
+                    ui.close_menu();
                 }
                 ui.separator();
                 if ui.button("Add Group Track").clicked() {
@@ -263,8 +223,7 @@ pub fn render(
                     .unwrap_or_default()
                     .as_millis()
                     / 500)
-                    % 2
-                    == 0;
+                    .is_multiple_of(2);
                 if pulse {
                     egui::Color32::from_rgb(0xff, 0x22, 0x22)
                 } else {

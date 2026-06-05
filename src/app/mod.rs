@@ -141,7 +141,7 @@ impl HdawApp {
             engine,
             track_ui: Vec::new(),
             selected_track: None,
-            toolbar_state: ToolbarState::default(),
+            toolbar_state: ToolbarState,
             timeline_state: TimelineState::default(),
             mixer_state: MixerPanelState::default(),
             effect_editor_state: EffectEditorState::default(),
@@ -406,10 +406,9 @@ impl HdawApp {
                 .get(&(track_idx, effect_idx))
                 .map_or((true, false, None), |s| (s.initialized, s.separate, s.container_hwnd));
 
-            if initialized && container_hwnd.is_some() {
+            if let Some(hwnd) = container_hwnd {
                 unsafe {
-                    if windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible(container_hwnd.unwrap() as _) == 0 {
-                        // Window was hidden (probably by user clicking X)
+                    if windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd as _) == 0 {
                         self.close_plugin_gui(track_idx, effect_idx);
                         continue;
                     }
@@ -435,11 +434,11 @@ impl HdawApp {
                     }
                 };
 
-                let container = crate::utils::native_window::NativeWindow::new(
+                let container = unsafe { crate::utils::native_window::NativeWindow::new(
                     &plugin_name,
                     800, 600,
                     parent_hwnd_for_container as _
-                );
+                ) };
 
                 if let Ok(win) = container {
                     if let Ok(mut ts) = self.engine.tracks.lock() {

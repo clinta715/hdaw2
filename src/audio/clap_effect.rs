@@ -24,7 +24,7 @@ thread_local! {
     static SCRATCH_OUT_L: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
     static SCRATCH_OUT_R: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
     static COMBINED_EVENTS: RefCell<EventBuffer> = RefCell::new(EventBuffer::with_capacity(256));
-    static DRAINED: RefCell<Vec<crate::audio::param_ring::ParamChange>> = RefCell::new(Vec::new());
+    static DRAINED: RefCell<Vec<crate::audio::param_ring::ParamChange>> = const { RefCell::new(Vec::new()) };
 }
 
 pub struct ClapEffectAdapter {
@@ -182,7 +182,7 @@ impl ClapEffectAdapter {
 
     pub fn set_parameter(&mut self, id: ParamId, value: f32) {
         self.state.set_parameter(id, value);
-        self.ring_buffer.push(id as u32, value as f64);
+        self.ring_buffer.push(id, value as f64);
     }
 
     /// Audio-thread method — applies param directly to state without pushing to ring.
@@ -201,10 +201,8 @@ impl ClapEffectAdapter {
 
     pub fn deactivate(&mut self) {
         if let Some(instance) = &mut self.instance {
-            if let Some(processor) = self.audio_processor.take() {
-                if let PluginAudioProcessor::Stopped(stopped) = processor {
-                    instance.deactivate(stopped);
-                }
+            if let Some(PluginAudioProcessor::Stopped(stopped)) = self.audio_processor.take() {
+                instance.deactivate(stopped);
             }
         }
     }
@@ -265,7 +263,7 @@ impl ClapEffectAdapter {
         if let Some(instance) = &mut self.instance {
             if let Some(gui_ext) = instance.plugin_shared_handle().get_extension::<PluginGui>() {
                 let mut handle = instance.plugin_handle();
-                let _ = gui_ext.destroy(&mut handle);
+                gui_ext.destroy(&mut handle);
             }
         }
         self.gui_created = false;
@@ -346,7 +344,7 @@ impl ClapEffectAdapter {
                 channels: AudioPortBufferType::f32_input_only(
                     [in_l_buf.as_mut_slice(), in_r_buf.as_mut_slice()]
                         .into_iter()
-                        .map(|b| InputChannel::variable(b)),
+                        .map(InputChannel::variable),
                 ),
             }]);
 

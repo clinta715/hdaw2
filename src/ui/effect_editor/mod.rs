@@ -15,22 +15,12 @@ fn truncate(s: &str, max: usize) -> String {
 }
 use eq_graph::{FxData, ParamData};
 
+#[derive(Default)]
 pub struct EffectEditorState {
     pub selected_track: Option<usize>,
     pub selected_effect: Option<usize>,
     pub show_editor: bool,
     pub show_add_menu: bool,
-}
-
-impl Default for EffectEditorState {
-    fn default() -> Self {
-        Self {
-            selected_track: None,
-            selected_effect: None,
-            show_editor: false,
-            show_add_menu: false,
-        }
-    }
 }
 
 fn read_fx_chain(app: &HdawApp, track_idx: usize) -> (Vec<FxData>, String) {
@@ -162,7 +152,7 @@ fn add_builtin_effect(app: &mut HdawApp, track_idx: usize, name: &str, etype: Ef
         if let Some(t) = ts.get_mut(track_idx) {
             effect_index = t.fx_chain.len();
             t.add_effect(instance);
-            serialized = t.fx_chain.last().map(|inst| engine_fx_to_serialized(inst)).unwrap();
+            serialized = t.fx_chain.last().map(engine_fx_to_serialized).unwrap();
         } else { return; }
     } else { return; }
     if let Some(track) = app.project.tracks.get_mut(track_idx) {
@@ -196,7 +186,7 @@ fn add_clap_effect(app: &mut HdawApp, track_idx: usize, desc: &crate::audio::cla
         if let Some(t) = ts.get_mut(track_idx) {
             effect_index = t.fx_chain.len();
             t.add_effect(instance);
-            serialized = t.fx_chain.last().map(|inst| engine_fx_to_serialized(inst)).unwrap();
+            serialized = t.fx_chain.last().map(engine_fx_to_serialized).unwrap();
         } else { return; }
     } else { return; }
     if let Some(track) = app.project.tracks.get_mut(track_idx) {
@@ -375,7 +365,7 @@ pub fn render(ctx: &Context, app: &mut HdawApp) {
                         if has_gui {
                             let state = app.active_plugin_guis.get(&(track_idx, ei));
                             let active = state.is_some();
-                            let is_separate = state.map_or(false, |s| s.separate);
+                            let is_separate = state.is_some_and(|s| s.separate);
 
                             ui.horizontal(|ui| {
                                 let btn_cc = if active && !is_separate { Color32::from_rgb(0x3a, 0xaa, 0x6a) } else { Color32::from_gray(80) };

@@ -79,6 +79,10 @@ impl EqEffect {
     }
 }
 
+impl Default for EqEffect {
+    fn default() -> Self { Self::new() }
+}
+
 impl Parameterizable for EqEffect {
     fn parameter_info(&self) -> &[ParameterInfo] { &self.info }
     fn parameter_value(&self, id: ParamId) -> f32 {

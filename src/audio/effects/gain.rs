@@ -37,6 +37,10 @@ impl GainEffect {
     }
 }
 
+impl Default for GainEffect {
+    fn default() -> Self { Self::new() }
+}
+
 impl Parameterizable for GainEffect {
     fn parameter_info(&self) -> &[ParameterInfo] {
         &self.info

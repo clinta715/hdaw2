@@ -15,6 +15,7 @@ thread_local! {
 /// instrument in the FX chain. Writes instrument output into `mix_l`/`mix_r`.
 ///
 /// Returns the instrument index so the caller can skip it in the FX chain loop.
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_midi(
     handle: &mut TrackHandle,
     pos: usize,
@@ -91,15 +92,14 @@ pub fn dispatch_midi(
                             ));
                         } else if note_start_timeline >= buf_start
                             && note_start_timeline < buf_end
+                            && note_start_timeline >= clip_start
                         {
-                            if note_start_timeline >= clip_start {
                                 let offset = (note_start_timeline - buf_start) as u32;
                                 if offset < frames as u32 {
                                     let pckn = Pckn::new(0u8, 0u8, note.pitch, 0u8);
                                     let vel = note.velocity as f64 / 127.0;
                                     buf.push(&NoteOnEvent::new(offset, pckn, vel));
                                 }
-                            }
                         }
 
                         if note_end_timeline >= buf_start && note_end_timeline < buf_end {

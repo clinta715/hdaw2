@@ -116,13 +116,11 @@ pub fn param_value_from_y(param_id: u32, y: f32, lane_rect: &Rect) -> f32 {
     let height = (bottom - top).max(1.0);
     match param_id {
         PARAM_VOLUME => {
-            let t = ((bottom - y) / height).clamp(0.0, 1.0);
-            t
+            ((bottom - y) / height).clamp(0.0, 1.0)
         }
         PARAM_PAN => {
             let center = (top + bottom) * 0.5;
-            let t = ((center - y) / (height * 0.5)).clamp(-1.0, 1.0);
-            t
+            ((center - y) / (height * 0.5)).clamp(-1.0, 1.0)
         }
         _ => ((bottom - y) / height).clamp(0.0, 1.0),
     }

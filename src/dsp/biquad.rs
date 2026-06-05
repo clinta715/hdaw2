@@ -25,6 +25,10 @@ impl BiquadState {
     pub fn reset(&mut self) { self.x1 = 0.0; self.x2 = 0.0; self.y1 = 0.0; self.y2 = 0.0; }
 }
 
+impl Default for BiquadState {
+    fn default() -> Self { Self::new() }
+}
+
 pub fn compute_coeffs(btype: &BiquadType, freq: f32, gain_db: f32, q: f32, sr: f32) -> BiquadCoeffs {
     let freq_clamped = freq.min(sr * 0.499);
     let w0 = 2.0 * std::f32::consts::PI * freq_clamped / sr;

@@ -60,7 +60,7 @@ fn draw_audio(
     // Waveform Texture Caching
     if available_w > 4.0 {
         if let Some(ref waveform) = clip.waveform_peaks {
-            let wav_width = waveform.peaks.len().min(4096).max(1);
+            let wav_width = waveform.peaks.len().clamp(1, 4096);
             let wav_height = (app.timeline_state.track_height as usize).max(1);
             let clip_id = clip.id;
 
@@ -82,8 +82,7 @@ fn draw_audio(
                     
                     let mut min = 0.0f32;
                     let mut max = 0.0f32;
-                    for p_idx in start..end {
-                        let p = &peaks[p_idx];
+                    for p in peaks.iter().skip(start).take(end.saturating_sub(start)) {
                         min = min.min(p.min);
                         max = max.max(p.max);
                     }
@@ -424,9 +423,9 @@ pub fn handle_interaction(
                 + app.timeline_state.scroll_y as f32;
             if pos.y < track_y || pos.y > track_y + track_height { continue; }
             // Collect clip bounds sorted by position
-            let mut bounds: Vec<(uuid::Uuid, f64, f64)> = track.clips.iter().filter_map(|c| match c {
-                crate::project::clip::ClipKind::Audio(a) => Some((a.id, a.position_frames as f64, a.length_frames as f64)),
-                crate::project::clip::ClipKind::Midi(m) => Some((m.id, m.position_frames as f64, m.length_frames as f64)),
+            let mut bounds: Vec<(uuid::Uuid, f64, f64)> = track.clips.iter().map(|c| match c {
+                crate::project::clip::ClipKind::Audio(a) => (a.id, a.position_frames as f64, a.length_frames as f64),
+                crate::project::clip::ClipKind::Midi(m) => (m.id, m.position_frames as f64, m.length_frames as f64),
             }).collect();
             bounds.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
             let hit_px = 6.0; // pixel tolerance for seam hit
@@ -436,7 +435,7 @@ pub fn handle_interaction(
                 let seam_frame = pos_a + len_a;
                 if seam_frame != pos_b { continue; } // only glue truly adjacent clips
                 let seam_x = (rect.left() + header_width) as f64 + (seam_frame / sr_f * pps - scroll);
-                if (pos.x as f64 - seam_x).abs() <= hit_px as f64 {
+                if (pos.x as f64 - seam_x).abs() <= hit_px {
                     app.glue_clips(track_idx, id_a, id_b);
                     return;
                 }

@@ -154,12 +154,11 @@ pub fn rebuild_engine_handles(
                         }
                     }
                     effect.reset(sample_rate);
-                    let inst = EffectInstance::new_builtin(
+                    EffectInstance::new_builtin(
                         sfx.name.clone(),
                         sfx.effect_type.clone(),
                         effect,
-                    );
-                    inst
+                    )
                 }
             };
             instance.set_bypass(sfx.bypass);
@@ -285,21 +284,17 @@ pub fn sync_engine_to_project(
             }
             track.fx_chain = fx;
             for (clip_id, notes) in clip_notes {
-                if let Some(clip) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Midi(m) if m.id == clip_id)) {
-                    if let ClipKind::Midi(m) = clip {
-                        if m.notes != notes {
-                            m.notes = notes;
-                            m.thumb_dirty = true;
-                        }
+                if let Some(ClipKind::Midi(m)) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Midi(m) if m.id == clip_id)) {
+                    if m.notes != notes {
+                        m.notes = notes;
+                        m.thumb_dirty = true;
                     }
                 }
             }
             for (clip_id, cc_events) in clip_cc {
-                if let Some(clip) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Midi(m) if m.id == clip_id)) {
-                    if let ClipKind::Midi(m) = clip {
-                        if m.cc_events != cc_events {
-                            m.cc_events = cc_events;
-                        }
+                if let Some(ClipKind::Midi(m)) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Midi(m) if m.id == clip_id)) {
+                    if m.cc_events != cc_events {
+                        m.cc_events = cc_events;
                     }
                 }
             }

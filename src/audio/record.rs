@@ -9,6 +9,7 @@ pub struct RecordingResult {
     pub total_samples: u64,
 }
 
+#[allow(clippy::type_complexity)]
 pub fn start_recording_thread(
     file_path: PathBuf,
     sample_rate: u32,

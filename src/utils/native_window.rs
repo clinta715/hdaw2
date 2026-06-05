@@ -10,7 +10,9 @@ pub struct NativeWindow {
 }
 
 impl NativeWindow {
-    pub fn new(title: &str, width: i32, height: i32, parent: HWND) -> Result<Self, String> {
+    /// # Safety
+    /// Caller must ensure `parent` is a valid window handle or null.
+    pub unsafe fn new(title: &str, width: i32, height: i32, parent: HWND) -> Result<Self, String> {
         INITIALIZED.call_once(|| {
             unsafe {
                 let h_instance = GetModuleHandleW(std::ptr::null());
@@ -39,7 +41,7 @@ impl NativeWindow {
             let title_w: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
             let class_name_w: Vec<u16> = CLASS_NAME.encode_utf16().collect();
             
-            let style = if parent == std::ptr::null_mut() {
+            let style = if parent.is_null() {
                 WS_OVERLAPPEDWINDOW | WS_VISIBLE
             } else {
                 WS_CHILD | WS_VISIBLE | WS_BORDER | WS_CAPTION | WS_THICKFRAME
@@ -58,7 +60,7 @@ impl NativeWindow {
                 std::ptr::null(),
             );
 
-            if hwnd == std::ptr::null_mut() {
+            if hwnd.is_null() {
                 return Err("Failed to create window".to_string());
             }
 
@@ -93,7 +95,7 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 let width = (lparam & 0xFFFF) as i32;
                 let height = ((lparam >> 16) & 0xFFFF) as i32;
                 let child = GetWindow(hwnd, GW_CHILD);
-                if child != std::ptr::null_mut() {
+                if !child.is_null() {
                     MoveWindow(child, 0, 0, width, height, 1);
                 }
                 0

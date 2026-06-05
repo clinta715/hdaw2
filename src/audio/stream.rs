@@ -47,7 +47,7 @@ pub fn find_device(name: &str) -> Option<cpal::Device> {
         return host.default_output_device();
     }
     match host.output_devices() {
-        Ok(mut devices) => devices.find(|d| d.name().map_or(false, |n| n == name)),
+        Ok(mut devices) => devices.find(|d| d.name().is_ok_and(|n| n == name)),
         Err(_) => None,
     }
 }
@@ -120,6 +120,7 @@ pub fn build_stream(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn mix_tracks(
     track_list: &mut std::sync::MutexGuard<Vec<TrackHandle>>,
     data: &mut [f32],
@@ -328,6 +329,7 @@ pub fn mix_tracks(
                                     let mut g_r = gr.borrow_mut();
                                     a.process(&mut g_l[gi], &mut g_r[gi], sample_rate);
                                 } else {
+                                    #[allow(clippy::mut_mutex_lock)]
                                     adapter.lock().ok();
                                 }
                             }
@@ -407,6 +409,7 @@ pub fn mix_tracks(
                             let mut r_r = rr.borrow_mut();
                             a.process(&mut r_l[ri], &mut r_r[ri], sample_rate);
                         } else {
+                            #[allow(clippy::mut_mutex_lock)]
                             adapter.lock().ok();
                         }
                     }
@@ -438,7 +441,7 @@ pub fn mix_tracks(
             let beat_sample = ((beat * sr / beats_per_sec) - pos as f64) as usize;
             if beat_sample < frames {
                 let click_len = (0.01 * sr).min((frames - beat_sample) as f64) as usize;
-                let click_freq = 1000.0 / sr as f64;
+                let click_freq = 1000.0 / sr;
                 METRONOME_SIN_TABLE.with(|tbl| {
                     let mut table = tbl.borrow_mut();
                     let needed = click_len;
@@ -486,11 +489,11 @@ pub fn name_audio_thread() {
         if flag.get() { return; }
         flag.set(true);
         unsafe {
-            type HANDLE = *mut std::ffi::c_void;
+            type Handle = *mut std::ffi::c_void;
             extern "system" {
-                fn GetCurrentThread() -> HANDLE;
+                fn GetCurrentThread() -> Handle;
                 fn SetThreadDescription(
-                    hThread: HANDLE,
+                    hThread: Handle,
                     lpThreadDescription: *const u16,
                 ) -> std::ffi::c_long;
             }
@@ -579,7 +582,7 @@ pub fn build_input_stream(
     let device = match device_name {
         Some(name) => {
             match host.input_devices() {
-                Ok(mut devices) => devices.find(|d| d.name().map_or(false, |n| n == name)),
+                Ok(mut devices) => devices.find(|d| d.name().is_ok_and(|n| n == name)),
                 Err(_) => None,
             }
         }

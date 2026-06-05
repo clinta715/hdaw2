@@ -57,8 +57,8 @@ fn clap_search_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-fn is_clap_file(path: &PathBuf) -> bool {
-    path.extension().map_or(false, |e| e == "clap")
+fn is_clap_file(path: &std::path::Path) -> bool {
+    path.extension().is_some_and(|e| e == "clap")
 }
 
 fn scan_clap_file(path: &PathBuf, results: &mut Vec<PluginDescriptor>) {

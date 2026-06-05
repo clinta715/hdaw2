@@ -21,6 +21,10 @@ impl DistortionEffect {
     }
 }
 
+impl Default for DistortionEffect {
+    fn default() -> Self { Self::new() }
+}
+
 impl Parameterizable for DistortionEffect {
     fn parameter_info(&self) -> &[ParameterInfo] { &self.info }
     fn parameter_value(&self, id: ParamId) -> f32 {
