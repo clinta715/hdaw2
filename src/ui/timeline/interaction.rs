@@ -2,7 +2,11 @@ use crate::app::HdawApp;
 use crate::project::clip::ClipKind;
 use crate::ui::timeline::clips;
 use crate::ui::timeline::track_headers;
-use crate::ui::timeline::{DragMode, LoopDragState, LoopHandle, RULER_HEIGHT};
+use crate::ui::timeline::{
+    compute_track_y_positions,
+    DragMode, LoopDragState, LoopHandle, VelocityDragState,
+    LANE_ROW_HEIGHT, VELOCITY_LANE_HEIGHT, RULER_HEIGHT,
+};
 use egui::{pos2, vec2, Rect, Response, Ui};
 use std::sync::atomic::Ordering;
 
@@ -278,17 +282,144 @@ pub fn handle_clip_interaction(response: &Response, ui: &Ui, rect: &Rect, app: &
     }
 }
 
+pub fn handle_velocity_lane_interaction(response: &Response, ui: &Ui, rect: &Rect, app: &mut HdawApp, header_width: f32, track_height: f32) {
+    let Some(track_idx) = app.expanded_track else { return };
+    let Some(track) = app.project.tracks.get(track_idx) else { return };
+    if !track.clips.iter().any(|c| matches!(c, ClipKind::Midi(_))) { return; }
+
+    let track_ys = compute_track_y_positions(rect, app, track_height);
+    let Some(track_y) = track_ys.get(track_idx).copied().flatten() else { return };
+    let num_lanes = track.automation_lanes.len().max(1) as f32;
+    let vel_y = track_y + track_height + num_lanes * LANE_ROW_HEIGHT;
+    let vel_rect = Rect::from_min_size(
+        pos2(rect.left() + header_width, vel_y),
+        vec2((rect.width() - header_width).max(0.0), VELOCITY_LANE_HEIGHT),
+    );
+
+    let pos = match ui.input(|i| i.pointer.interact_pos()) {
+        Some(p) if vel_rect.contains(p) && response.hover_pos().is_some() => p,
+        _ => {
+            if response.drag_stopped() {
+                if let Some(vd) = app.timeline_state.velocity_drag.take() {
+                    let new_note = app.project.tracks.get(vd.track_index)
+                        .and_then(|t| t.clips.iter().find_map(|c| match c {
+                            ClipKind::Midi(m) if m.id == vd.clip_id => m.notes.get(vd.note_index).cloned(),
+                            _ => None,
+                        }));
+                    if let Some(new_note) = new_note {
+                        if new_note.velocity != vd.old_note.velocity {
+                            app.undo_service.push(crate::app::undo::UndoCommand::UpdateMidiNote {
+                                track_index: vd.track_index,
+                                clip_id: vd.clip_id,
+                                note_index: vd.note_index,
+                                old_note: vd.old_note,
+                                new_note,
+                            });
+                        }
+                    }
+                }
+            }
+            return;
+        }
+    };
+
+    let sr_f = app.engine.transport.sample_rate() as f64;
+    let pps = app.timeline_state.pixels_per_second;
+    let scroll_x = app.timeline_state.scroll_x;
+
+    let timeline_frame = ((pos.x - vel_rect.left()) as f64 + scroll_x) / pps * sr_f;
+    let timeline_frame = timeline_frame as u64;
+
+    // Find the MIDI note closest to click position
+    let mut best: Option<(usize, usize, u64, i64)> = None;
+    for (ci, clip) in track.clips.iter().enumerate() {
+        let ClipKind::Midi(m) = clip else { continue };
+        for (ni, note) in m.notes.iter().enumerate() {
+            let nf = m.position_frames + note.start_frame;
+            let dist = (nf as i64 - timeline_frame as i64).abs();
+            if best.map_or(true, |(_, _, _, bd)| dist < bd) {
+                best = Some((ci, ni, nf, dist));
+            }
+        }
+    }
+
+    let Some((_ci, ni, _nf, dist)) = best else { return };
+    let hit_threshold = (sr_f as f64 / pps * 4.0) as u64;
+    if dist as u64 > hit_threshold { return; }
+
+    // Find the MIDI clip and note in project model
+    let Some((clip_id, clip)) = track.clips.iter().find_map(|c| match c {
+        ClipKind::Midi(m) if m.notes.len() > ni => Some((m.id, c)),
+        _ => None,
+    }) else { return };
+
+    let ClipKind::Midi(midi_clip) = clip else { return };
+
+    // Map Y to velocity
+    let vel_frac = ((vel_rect.bottom() - pos.y) / vel_rect.height()).clamp(0.0, 1.0);
+    let new_velocity = (vel_frac * 127.0).round() as u8;
+
+    if response.dragged() && app.timeline_state.velocity_drag.is_some() {
+        // Update velocity during drag (no undo push)
+        if let Some(track) = app.project.tracks.get_mut(track_idx) {
+            if let Some(ClipKind::Midi(m)) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Midi(mc) if mc.id == clip_id)) {
+                if ni < m.notes.len() {
+                    m.notes[ni].velocity = new_velocity;
+                }
+            }
+        }
+        if let Ok(mut tracks) = app.engine.tracks.lock() {
+            if let Some(handle) = tracks.get_mut(track_idx) {
+                if let Some(ch) = handle.clips.iter_mut().find(|c| c.clip_id == clip_id) {
+                    if ni < ch.midi_notes.len() {
+                        ch.midi_notes[ni].velocity = new_velocity;
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    if response.clicked_by(egui::PointerButton::Primary) && !response.dragged() {
+        let old_note = midi_clip.notes[ni].clone();
+        app.timeline_state.velocity_drag = Some(VelocityDragState {
+            track_index: track_idx,
+            clip_id,
+            note_index: ni,
+            old_note,
+        });
+        if let Some(track) = app.project.tracks.get_mut(track_idx) {
+            if let Some(ClipKind::Midi(m)) = track.clips.iter_mut().find(|c| matches!(c, ClipKind::Midi(mc) if mc.id == clip_id)) {
+                if ni < m.notes.len() {
+                    m.notes[ni].velocity = new_velocity;
+                }
+            }
+        }
+        if let Ok(mut tracks) = app.engine.tracks.lock() {
+            if let Some(handle) = tracks.get_mut(track_idx) {
+                if let Some(ch) = handle.clips.iter_mut().find(|c| c.clip_id == clip_id) {
+                    if ni < ch.midi_notes.len() {
+                        ch.midi_notes[ni].velocity = new_velocity;
+                    }
+                }
+            }
+        }
+        return;
+    }
+}
+
 pub fn handle_track_header_interaction(response: &Response, ui: &Ui, rect: &Rect, app: &mut HdawApp, header_width: f32, track_height: f32) {
     if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
         if response.hover_pos().is_some()
             && pos.x >= rect.left()
             && pos.x <= rect.left() + header_width
         {
+            let track_ys: Vec<Option<f32>> = compute_track_y_positions(rect, app, track_height);
+
             if response.clicked_by(egui::PointerButton::Secondary) {
                 let track_count = app.track_ui.len();
                 for i in 0..track_count {
-                    let track_y = rect.top() + RULER_HEIGHT + i as f32 * track_height
-                        + app.timeline_state.scroll_y as f32;
+                    let Some(track_y) = track_ys[i] else { continue; };
                     let header_rect = Rect::from_min_size(
                         pos2(rect.left(), track_y),
                         vec2(header_width, track_height),
@@ -304,8 +435,7 @@ pub fn handle_track_header_interaction(response: &Response, ui: &Ui, rect: &Rect
 
             let track_count = app.track_ui.len();
             for i in 0..track_count {
-                let track_y = rect.top() + RULER_HEIGHT + i as f32 * track_height
-                    + app.timeline_state.scroll_y as f32;
+                let Some(track_y) = track_ys[i] else { continue; };
                 let header_rect = Rect::from_min_size(
                     pos2(rect.left(), track_y),
                     vec2(header_width, track_height),
@@ -344,6 +474,9 @@ pub fn handle_track_header_interaction(response: &Response, ui: &Ui, rect: &Rect
                         }
                         track_headers::HeaderAction::ToggleCollapse => {
                             app.track_ui[i].collapsed ^= true;
+                        }
+                        track_headers::HeaderAction::ToggleExpand => {
+                            app.expanded_track = if app.expanded_track == Some(i) { None } else { Some(i) };
                         }
                         track_headers::HeaderAction::Select => {
                             app.select_track(i);

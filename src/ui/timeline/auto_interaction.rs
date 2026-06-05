@@ -1,6 +1,6 @@
 use crate::app::HdawApp;
 use crate::ui::timeline::automation;
-use crate::ui::timeline::{AutoDragState, RULER_HEIGHT};
+use crate::ui::timeline::{AutoDragState, compute_track_y_positions};
 use egui::{pos2, vec2, Rect, Response};
 
 pub fn sync_automation_to_project(app: &mut HdawApp) {
@@ -34,8 +34,11 @@ pub fn handle_automation_interaction(response: &Response, rect: &Rect, app: &mut
         None => return,
     };
 
-    let track_y = rect.top() + RULER_HEIGHT + track_idx as f32 * track_height
-        + app.timeline_state.scroll_y as f32;
+    let track_ys = compute_track_y_positions(rect, app, track_height);
+    let track_y = match track_ys.get(track_idx).copied().flatten() {
+        Some(y) => y,
+        None => return,
+    };
     let lane_rect = Rect::from_min_size(
         pos2(rect.left() + header_width, track_y),
         vec2((rect.width() - header_width).max(0.0), track_height),

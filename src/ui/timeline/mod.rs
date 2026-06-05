@@ -7,6 +7,7 @@ mod ruler;
 mod track_headers;
 
 use crate::app::HdawApp;
+use crate::project::clip::ClipKind;
 use egui::{pos2, vec2, Color32, Rect, Response, Sense, Ui};
 
 fn truncate(s: &str, max: usize) -> String {
@@ -23,6 +24,9 @@ pub const CLIP_CORNER_RADIUS: f32 = 3.0;
 pub const PLAYHEAD_WIDTH: f32 = 2.0;
 pub const DEFAULT_HEADER_WIDTH: f32 = 220.0;
 pub const DEFAULT_TRACK_HEIGHT: f32 = 80.0;
+pub const EXPANDED_TRACK_HEIGHT: f32 = 280.0;
+pub const LANE_ROW_HEIGHT: f32 = 60.0;
+pub const VELOCITY_LANE_HEIGHT: f32 = 60.0;
 
 pub struct TimelineState {
     pub scroll_x: f64,
@@ -31,6 +35,7 @@ pub struct TimelineState {
     pub selected_clip_id: Option<uuid::Uuid>,
     pub drag_state: Option<DragState>,
     pub auto_drag: Option<AutoDragState>,
+    pub velocity_drag: Option<VelocityDragState>,
     pub snap_enabled: bool,
     pub loop_drag: Option<LoopDragState>,
     pub ruler_context_menu: Option<RulerContextMenu>,
@@ -121,6 +126,13 @@ pub struct AutoDragState {
     pub old_value: f32,
 }
 
+pub struct VelocityDragState {
+    pub track_index: usize,
+    pub clip_id: uuid::Uuid,
+    pub note_index: usize,
+    pub old_note: crate::project::midi_note::MidiNote,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum DragMode {
     Move,
@@ -140,6 +152,7 @@ impl Default for TimelineState {
             selected_clip_id: None,
             drag_state: None,
             auto_drag: None,
+            velocity_drag: None,
             snap_enabled: true,
             loop_drag: None,
             ruler_context_menu: None,
@@ -242,6 +255,7 @@ pub fn render(ui: &mut Ui, app: &mut HdawApp) {
     app.handle_pool_drop(&response, ui, &rect);
     interaction::handle_clip_interaction(&response, ui, &rect, app, header_width, track_height);
     interaction::handle_track_header_interaction(&response, ui, &rect, app, header_width, track_height);
+    interaction::handle_velocity_lane_interaction(&response, ui, &rect, app, header_width, track_height);
     auto_interaction::sync_automation_to_project(app);
     auto_interaction::handle_automation_interaction(&response, &rect, app, header_width, track_height);
 
@@ -767,6 +781,105 @@ fn draw_grid_lines(painter: &egui::Painter, rect: &Rect, state: &TimelineState, 
     }
 }
 
+fn lane_label(lane: &crate::project::automation::AutomationLane) -> String {
+    use crate::project::automation::PARAM_VOLUME;
+    use crate::project::automation::PARAM_PAN;
+    match lane.param_id {
+        PARAM_VOLUME => "Volume".into(),
+        PARAM_PAN => "Pan".into(),
+        id => format!("Param {}", id),
+    }
+}
+
+pub fn expanded_extra_for_track(app: &HdawApp, track_idx: usize) -> f32 {
+    if app.expanded_track != Some(track_idx) { return 0.0; }
+    let Some(track) = app.project.tracks.get(track_idx) else { return 0.0; };
+    let num_lanes = track.automation_lanes.len().max(1) as f32;
+    let has_midi = track.clips.iter().any(|c| matches!(c, ClipKind::Midi(_)));
+    num_lanes * LANE_ROW_HEIGHT + if has_midi { VELOCITY_LANE_HEIGHT } else { 0.0 }
+}
+
+/// Computes the Y position of each visible track in the timeline.
+/// Returns `None` for hidden tracks.
+pub fn compute_track_y_positions(rect: &Rect, app: &HdawApp, track_height: f32) -> Vec<Option<f32>> {
+    let track_count = app.track_ui.len();
+    let mut hidden_by_collapse = vec![false; track_count];
+    for (i, hidden) in hidden_by_collapse.iter_mut().enumerate() {
+        let mut cursor = i;
+        loop {
+            let pg = app.track_ui[cursor].parent_group;
+            match pg {
+                Some(pid) => {
+                    let parent_idx = app.track_ui.iter().position(|t| t.id == pid);
+                    match parent_idx {
+                        Some(pi) if pi < i || pi != cursor => {
+                            if app.track_ui[pi].collapsed {
+                                *hidden = true;
+                                break;
+                            }
+                            cursor = pi;
+                        }
+                        _ => break,
+                    }
+                }
+                None => break,
+            }
+        }
+    }
+    let mut result = vec![None; track_count];
+    let mut y = rect.top() + RULER_HEIGHT + app.timeline_state.scroll_y as f32;
+    for i in 0..track_count {
+        if hidden_by_collapse[i] { continue; }
+        result[i] = Some(y);
+        y += track_height + expanded_extra_for_track(app, i);
+    }
+    result
+}
+
+/// Given track Y positions from `compute_track_y_positions`, finds which track
+/// contains the given screen Y coordinate. Returns `None` if no track is hit.
+pub fn track_idx_from_y(ys: &[Option<f32>], y: f32, track_height: f32) -> Option<usize> {
+    for (i, ty) in ys.iter().enumerate() {
+        if let Some(ty) = ty {
+            if y >= *ty && y < *ty + track_height {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+fn draw_velocity_lane(painter: &egui::Painter, vel_rect: &Rect, app: &HdawApp, track_idx: usize, sr: u32) {
+    let Some(track) = app.project.tracks.get(track_idx) else { return };
+    let pps = app.timeline_state.pixels_per_second;
+    let scroll_x = app.timeline_state.scroll_x;
+    let sr = sr as f64;
+
+    // Track the vertical span of all clips for reference lines
+    let bot = vel_rect.bottom() - 2.0;
+    let top = vel_rect.top() + 2.0;
+    let height = (bot - top).max(1.0);
+
+    for clip in &track.clips {
+        let ClipKind::Midi(m) = clip else { continue };
+        for note in &m.notes {
+            let timeline_frame = m.position_frames + note.start_frame;
+            let x = vel_rect.left() + (timeline_frame as f64 / sr * pps - scroll_x) as f32;
+            if x < vel_rect.left() || x > vel_rect.right() { continue; }
+            let v = (note.velocity as f32 / 127.0).clamp(0.0, 1.0);
+            let bar_h = height * v;
+            let bar_top = bot - bar_h;
+            let bar_rect = Rect::from_min_max(pos2(x - 2.0, bar_top), pos2(x + 2.0, bot));
+            let color = Color32::from_rgb(
+                (80.0 + 175.0 * v) as u8,
+                175,
+                (80.0 * (1.0 - v)) as u8,
+            );
+            painter.rect_filled(bar_rect, 1.0, color);
+        }
+    }
+}
+
 fn render_tracks(painter: &egui::Painter, rect: &Rect, sr: u32, app: &mut HdawApp, header_width: f32, track_height: f32) {
     let track_count = app.track_ui.len();
 
@@ -809,15 +922,16 @@ fn render_tracks(painter: &egui::Painter, rect: &Rect, sr: u32, app: &mut HdawAp
         }
     }
 
-    let mut visible_idx = 0usize;
+    let mut track_y = rect.top() + RULER_HEIGHT + app.timeline_state.scroll_y as f32;
     for i in 0..track_count {
         if hidden_by_collapse[i] { continue; }
 
-        let track_y = rect.top() + RULER_HEIGHT + visible_idx as f32 * track_height
-            + app.timeline_state.scroll_y as f32;
-        visible_idx += 1;
+        let is_expanded = app.expanded_track == Some(i);
+        let extra = expanded_extra_for_track(app, i);
+        let total_height = track_height + extra;
 
         if track_y + track_height < rect.top() || track_y > rect.bottom() {
+            track_y += total_height;
             continue;
         }
 
@@ -832,7 +946,7 @@ fn render_tracks(painter: &egui::Painter, rect: &Rect, sr: u32, app: &mut HdawAp
 
         let is_selected = app.selected_track == Some(i);
         let track_ui = &app.track_ui[i];
-        track_headers::draw(painter, &header_rect, track_ui, is_selected, &fx_infos[i]);
+        track_headers::draw(painter, &header_rect, track_ui, is_selected, is_expanded, &fx_infos[i]);
 
         if app.track_ui[i].is_group || app.track_ui[i].is_return {
             let lane_bg = if app.track_ui[i].is_group {
@@ -852,13 +966,66 @@ fn render_tracks(painter: &egui::Painter, rect: &Rect, sr: u32, app: &mut HdawAp
             }
         }
 
-        if app.selected_track == Some(i) {
+        if is_selected {
             if let Ok(tracks) = app.engine.tracks.lock() {
                 if let Some(handle) = tracks.get(i) {
                     automation::draw(painter, &lane_rect, &handle.automation_lanes, &app.timeline_state, sr);
                 }
             }
         }
+
+        // ===== Expanded area below the track =====
+        if is_expanded && extra > 0.0 {
+            let expand_base = track_y + track_height;
+            let page_rect = Rect::from_min_size(
+                pos2(rect.left(), expand_base),
+                vec2(rect.width(), extra),
+            );
+            painter.rect_filled(page_rect, 0.0, Color32::from_rgb(0x18, 0x20, 0x28));
+            painter.rect_stroke(page_rect, 0.0, egui::Stroke::new(1.0, Color32::from_rgb(0x33, 0x44, 0x55)));
+
+            // Draw stacked automation lanes
+            if let Ok(tracks) = app.engine.tracks.lock() {
+                if let Some(handle) = tracks.get(i) {
+                    for (li, lane) in handle.automation_lanes.iter().enumerate() {
+                        let lane_row_rect = Rect::from_min_size(
+                            pos2(rect.left() + header_width, expand_base + li as f32 * LANE_ROW_HEIGHT),
+                            vec2((rect.width() - header_width).max(0.0), LANE_ROW_HEIGHT),
+                        );
+                        painter.text(
+                            pos2(rect.left() + 6.0, lane_row_rect.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            lane_label(lane),
+                            egui::FontId::proportional(10.0),
+                            Color32::from_gray(140),
+                        );
+                        automation::draw_lane(painter, &lane_row_rect, lane, &app.timeline_state, sr, automation::lane_color(lane));
+                    }
+                }
+            }
+
+            // Velocity lane
+            let vel_y = expand_base + app.project.tracks[i].automation_lanes.len().max(1) as f32 * LANE_ROW_HEIGHT;
+            let has_midi = app.project.tracks.get(i)
+                .map(|t| t.clips.iter().any(|c| matches!(c, ClipKind::Midi(_))))
+                .unwrap_or(false);
+            if has_midi {
+                let vel_rect = Rect::from_min_size(
+                    pos2(rect.left() + header_width, vel_y),
+                    vec2((rect.width() - header_width).max(0.0), VELOCITY_LANE_HEIGHT),
+                );
+                painter.text(
+                    pos2(rect.left() + 6.0, vel_rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    "Velocity",
+                    egui::FontId::proportional(10.0),
+                    Color32::from_gray(140),
+                );
+                draw_velocity_lane(painter, &vel_rect, app, i, sr);
+            }
+        }
+
+        track_y += total_height;
     }
 }
 

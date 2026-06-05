@@ -16,6 +16,7 @@ pub fn draw(
     rect: &Rect,
     track: &crate::app::TrackUiState,
     is_selected: bool,
+    is_expanded: bool,
     fx_info: &TrackFxInfo,
 ) {
     let bg = if is_selected {
@@ -108,6 +109,11 @@ pub fn draw(
         let arrow = if track.collapsed { "▸" } else { "▾" };
         painter.text(arrow_rect.center(), egui::Align2::CENTER_CENTER, arrow, body_font.clone(), Color32::from_gray(160));
     }
+
+    let expand_btn = expand_btn_rect(rect);
+    let expand_bg = if is_expanded { Color32::from_rgb(0x42, 0xa5, 0xf5) } else { Color32::from_gray(60) };
+    painter.rect_filled(expand_btn, 1.0, expand_bg);
+    painter.text(expand_btn.center(), egui::Align2::CENTER_CENTER, "⇕", small_font.clone(), Color32::from_gray(220));
 
     // Buttons
     let mute = track.mute.load(Ordering::Acquire);
@@ -202,6 +208,10 @@ pub fn arm_btn_rect(rect: &Rect) -> Rect {
     Rect::from_min_size(pos2(rect.left() + 66.0, rect.top() + 50.0), vec2(24.0, 16.0))
 }
 
+pub fn expand_btn_rect(rect: &Rect) -> Rect {
+    Rect::from_min_size(pos2(rect.right() - 52.0, rect.top() + 50.0), vec2(18.0, 16.0))
+}
+
 pub fn collapse_btn_rect(rect: &Rect) -> Rect {
     Rect::from_min_size(pos2(rect.left() + 8.0, rect.top() + 2.0), vec2(16.0, 16.0))
 }
@@ -209,6 +219,7 @@ pub fn collapse_btn_rect(rect: &Rect) -> Rect {
 pub fn hit_test(rect: &Rect, pos: Pos2, is_group: bool, _is_return: bool) -> HeaderAction {
     if !rect.contains(pos) { return HeaderAction::None; }
     if is_group && collapse_btn_rect(rect).contains(pos) { return HeaderAction::ToggleCollapse; }
+    if expand_btn_rect(rect).contains(pos) { return HeaderAction::ToggleExpand; }
     if mute_btn_rect(rect).contains(pos) { return HeaderAction::ToggleMute; }
     if solo_btn_rect(rect).contains(pos) { return HeaderAction::ToggleSolo; }
     if arm_btn_rect(rect).contains(pos) { return HeaderAction::ToggleArm; }
@@ -224,6 +235,7 @@ pub enum HeaderAction {
     ToggleSolo,
     ToggleArm,
     ToggleCollapse,
+    ToggleExpand,
     Volume,
     Pan,
 }

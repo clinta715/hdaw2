@@ -5,7 +5,7 @@ use egui::{pos2, Color32, Pos2, Rect, Shape, Stroke};
 const POINT_RADIUS: f32 = 4.0;
 const HIT_RADIUS: f32 = 6.0;
 
-fn lane_color(lane: &AutomationLane) -> Color32 {
+pub fn lane_color(lane: &AutomationLane) -> Color32 {
     match lane.param_id {
         PARAM_VOLUME => Color32::from_rgb(0x4c, 0xaf, 0x50),
         PARAM_PAN => Color32::from_rgb(0x42, 0xa5, 0xf5),
@@ -40,7 +40,7 @@ pub fn draw(
     }
 }
 
-fn draw_lane(
+pub fn draw_lane(
     painter: &egui::Painter,
     lane_rect: &Rect,
     lane: &AutomationLane,

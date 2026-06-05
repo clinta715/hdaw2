@@ -2,7 +2,8 @@ use crate::app::HdawApp;
 use crate::project::clip::{AudioClip, ClipKind};
 use crate::project::midi_clip::MidiClip;
 
-use crate::ui::timeline::{DragMode, DragState, CLIP_CORNER_RADIUS, RULER_HEIGHT};
+use crate::ui::timeline::{DragMode, DragState, CLIP_CORNER_RADIUS};
+use crate::ui::timeline::{compute_track_y_positions, track_idx_from_y};
 use egui::{pos2, vec2, Color32, Pos2, Rect, Response, Stroke};
 
 const CLIP_LABEL_SIZE: f32 = 10.0;
@@ -363,6 +364,8 @@ pub fn handle_interaction(
     let pps = app.timeline_state.pixels_per_second;
     let scroll = app.timeline_state.scroll_x;
 
+    let track_ys = compute_track_y_positions(rect, app, track_height);
+
     // Handle ongoing drag (before track iteration) — allows cross-track movement
     if response.dragged() {
         if let Some(ref drag) = app.timeline_state.drag_state.clone() {
@@ -379,12 +382,11 @@ pub fn handle_interaction(
                     }
                     app.update_clip_position(drag.track_index, drag.clip_id, new_pos);
                     // Update target track based on mouse Y
-                    let new_ti = ((pos.y - rect.top() - RULER_HEIGHT - app.timeline_state.scroll_y as f32) / track_height)
-                        .floor() as i32;
-                    if new_ti >= 0 && (new_ti as usize) < app.project.tracks.len() {
-                        let new_ti = new_ti as usize;
-                        if let Some(d) = app.timeline_state.drag_state.as_mut() {
-                            d.track_index = new_ti;
+                    if let Some(new_ti) = track_idx_from_y(&track_ys, pos.y, track_height) {
+                        if new_ti < app.project.tracks.len() {
+                            if let Some(d) = app.timeline_state.drag_state.as_mut() {
+                                d.track_index = new_ti;
+                            }
                         }
                     }
                 }
@@ -419,21 +421,19 @@ pub fn handle_interaction(
     // Seam-click detection: glue two adjacent clips
     if response.clicked_by(egui::PointerButton::Primary) && !response.dragged() {
         for (track_idx, track) in app.project.tracks.iter().enumerate() {
-            let track_y = rect.top() + RULER_HEIGHT + track_idx as f32 * track_height
-                + app.timeline_state.scroll_y as f32;
+            let Some(track_y) = track_ys.get(track_idx).copied().flatten() else { continue; };
             if pos.y < track_y || pos.y > track_y + track_height { continue; }
-            // Collect clip bounds sorted by position
             let mut bounds: Vec<(uuid::Uuid, f64, f64)> = track.clips.iter().map(|c| match c {
                 crate::project::clip::ClipKind::Audio(a) => (a.id, a.position_frames as f64, a.length_frames as f64),
                 crate::project::clip::ClipKind::Midi(m) => (m.id, m.position_frames as f64, m.length_frames as f64),
             }).collect();
             bounds.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-            let hit_px = 6.0; // pixel tolerance for seam hit
+            let hit_px = 6.0;
             for pair in bounds.windows(2) {
                 let (id_a, pos_a, len_a) = pair[0];
                 let (id_b, pos_b, _len_b) = pair[1];
                 let seam_frame = pos_a + len_a;
-                if seam_frame != pos_b { continue; } // only glue truly adjacent clips
+                if seam_frame != pos_b { continue; }
                 let seam_x = (rect.left() + header_width) as f64 + (seam_frame / sr_f * pps - scroll);
                 if (pos.x as f64 - seam_x).abs() <= hit_px {
                     app.glue_clips(track_idx, id_a, id_b);
@@ -444,8 +444,7 @@ pub fn handle_interaction(
     }
 
     for (track_idx, track) in app.project.tracks.iter().enumerate() {
-        let track_y = rect.top() + RULER_HEIGHT + track_idx as f32 * track_height
-            + app.timeline_state.scroll_y as f32;
+        let Some(track_y) = track_ys.get(track_idx).copied().flatten() else { continue; };
         if pos.y < track_y || pos.y > track_y + track_height {
             continue;
         }
@@ -474,9 +473,7 @@ pub fn handle_interaction(
                 if response.dragged() && app.timeline_state.drag_state.is_none() {
                     let local_x = pos.x as f64;
                     let local_y = pos.y as f64;
-                    let track_top = rect.top() + RULER_HEIGHT + track_idx as f32 * track_height
-                        + app.timeline_state.scroll_y as f32;
-                    let rel_y = local_y - track_top as f64;
+                    let rel_y = local_y - track_y as f64;
                     let fade_hit_area = FADE_HIT_AREA;
                     let (f_in, f_out) = read_fade_frames(clip_kind);
 
@@ -589,7 +586,7 @@ pub fn handle_interaction(
                 let sr = app.engine.transport.sample_rate();
                 let bpm = app.project.bpm;
                 let start_frame = app.timeline_state.snap_frames_to_grid((time * sr as f64) as u64, sr, bpm, &app.preferences, &app.project.markers);
-                let length_frames = sr as u64; // 1 second default
+                let length_frames = sr as u64;
                 app.add_midi_clip(track_idx, start_frame, length_frames);
             }
             return;
