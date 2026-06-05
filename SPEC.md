@@ -90,22 +90,20 @@
 +-----------------------------------------------------------------+
 ```
 
-### Layout Implementation in Slint
+### Layout Implementation with egui
 
-```slint
-export component MainWindow inherits Window {
-    VerticalLayout {
-        MenuBar { }
-        TransportBar { }
-        HorizontalLayout {
-            // Left: Timeline takes most space
-            TimelineView { horizontal-stretch: 3; }
-            // Right: Mixer panel
-            MixerPanel { horizontal-stretch: 1; }
-        }
-        EffectEditorPanel { }
+```rust
+// CentralPanel dispatches main view (Arrange/PianoRoll)
+egui::CentralPanel::default().show(ctx, |ui| {
+    match app.main_view {
+        MainView::Arrange => crate::ui::timeline::render(ui, app),
+        MainView::PianoRoll => crate::ui::piano_roll::render_panel(ui, app),
     }
-}
+});
+
+// Right panel and bottom panel are tiled via SidePanel/TopBottomPanel
+crate::ui::right_panel::render(ctx, app);
+crate::ui::bottom_panel::render(ctx, app);
 ```
 
 ---
@@ -300,7 +298,7 @@ Master bus:
 Implementation:
 - Pre-calculate min/max peaks per pixel (offline)
 - Cache waveform data on disk (like Ardour)
-- Render using Slint Canvas or custom drawing
+- Render using egui painter (waveform peaks as filled rects per pixel column)
 - Support zoom (horizontal and vertical)
 - Show playhead, loop region, clip boundaries
 
@@ -332,7 +330,7 @@ Using `timestretch` crate:
 
 | Task | Description |
 |------|-------------|
-| 1.1 | Project scaffolding with Slint + cpal |
+| 1.1 | Project scaffolding with egui + cpal |
 | 1.2 | Audio thread setup with callback |
 | 1.3 | Load and play audio file (single track) |
 | 1.4 | Basic transport (play/stop) |
@@ -510,24 +508,22 @@ hdaw/
 │   │   ├── automation.rs       # Automation model
 │   │   └── io.rs               # Save/load
 │   ├── ui/
-│   │   ├── main_window.rs      # Main window
-│   │   ├── timeline.rs         # Timeline view
-│   │   ├── mixer.rs            # Mixer panel
-│   │   ├── transport.rs        # Transport bar
-│   │   ├── waveform.rs         # Waveform display
-│   │   ├── automation.rs       # Automation editor
-│   │   └── components/         # Reusable UI components
+│   │   ├── app_ui.rs           # Panel layout (tiled: right, central, bottom, status)
+│   │   ├── toolbar.rs          # Menu bar + transport controls
+│   │   ├── timeline/           # Arrangement view (clips, ruler, automation)
+│   │   ├── piano_roll.rs       # MIDI grid editor
+│   │   ├── right_panel.rs      # Browser / Clip Info / FX Detail
+│   │   ├── bottom_panel.rs     # Mixer / Sends / FX Chain
+│   │   ├── preferences.rs      # Preferences dialog + state
+│   │   ├── effect_editor/      # FX chain + parameter UI
+│   │   ├── audio_pool.rs       # Imported audio pool
+│   │   └── panels.rs           # Floating panel registry
 │   └── utils/
 │       ├── waveform.rs         # Waveform generation
 │       └── timestretch.rs      # Time-stretch wrapper
-├── ui/
-│   ├── main.slint              # Main window UI
-│   ├── timeline.slint          # Timeline component
-│   ├── mixer.slint             # Mixer component
-│   ├── transport.slint         # Transport component
-│   └── components/            # Reusable .slint files
 └── tests/
     └── audio_tests.rs          # Audio processing tests
+    └── midi_pipeline_test.rs   # MIDI→CLAP→audio integration tests
 ```
 
 ---
@@ -536,27 +532,22 @@ hdaw/
 
 ```toml
 [dependencies]
-slint = "1.16"
-cpal = "0.16"
+egui = "0.30"
+eframe = "0.30"
+cpal = "0.15"
 dasp = "0.11"
 serde = { version = "1.0", features = ["derive"] }
-ron = "1.0"
-tokio = { version = "1.0", features = ["full"] }
+ron = "0.8"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 uuid = { version = "1.0", features = ["v4", "serde"] }
 
 # Audio file handling
-audio-file = "0.2"        # neodsp crate
-symphonium = "0.6"        # audio loading wrapper
+hound = "3.5"                 # WAV loading
 
-# DSP
-timestretch = "0.4"       # time-stretch algorithm
-rustfft = "6.2"           # FFT
-spectrum-analyzer = "1.7"  # FFT wrapper
-
-# Utilities
-crossbeam = "0.8"         # cross-thread communication
+# CLAP plugin hosting
+clack-host = "0.1"
+clack-extensions = "0.1"
 ```
 
 ---
@@ -572,15 +563,15 @@ crossbeam = "0.8"         # cross-thread communication
 ### First Steps
 
 1. Initialize new Rust project with cargo
-2. Add Slint and cpal dependencies
-3. Verify empty window displays
+2. Add egui and cpal dependencies
+3. Verify egui window displays with audio callback
 4. Confirm audio device enumeration works
 5. Build minimal audio playback prototype
 
 ### Architecture Principles
 
 1. **Audio thread is sacred** - Never block it, never allocate
-2. **UI is declarative** - Slint handles state binding automatically
+2. **UI is immediate mode** - egui renders every frame from state
 3. **Everything is a parameter** - Track volume, effect knobs, transport position
 4. **Non-destructive editing** - Clips reference audio files, don't modify them
 5. **State is serializable** - Entire project can be saved as RON file
