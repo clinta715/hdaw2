@@ -1,5 +1,19 @@
 # HDAW Architecture Guide for AI Agents
 
+## v0.8.0 Changes (Expanded Track View + Audio Engine Performance)
+
+### Expanded Track View
+- **Track expand button** (`track_headers.rs`): ⇕ button on track header toggles `app.expanded_track: Option<usize>`. When expanded, the track gets extra vertical space below with stacked automation lanes and velocity lane.
+- **Stacked automation lanes** (`mod.rs`): Each automation lane renders as a 60px row in the expanded area, using `automation::draw_lane()` with per-lane labels. Supports Volume, Pan, and effect-param lanes.
+- **Velocity lane** (`mod.rs`): 60px lane showing MIDI note velocity bars along the timeline. Click-drag to edit velocity with full undo via `UpdateMidiNote`.
+- **Variable-height track Y positions** (`mod.rs`, `interaction.rs`, `clips.rs`, `auto_interaction.rs`): `compute_track_y_positions()`/`track_idx_from_y()` helpers replace the old `idx * track_height` formula. All interaction handlers (clip drag/trim/seam-click, header clicks, auto point drag) now use running Y offset that accounts for expanded extra height and hidden-by-collapse tracks.
+- **`RULER_HEIGHT`/`LANE_ROW_HEIGHT`/`VELOCITY_LANE_HEIGHT`/`expanded_extra_for_track`**: Made `pub` for cross-module use.
+
+### Audio Engine Performance  
+- **SPSC lock-free parameter pipeline** (`param_ring.rs`, `clap_effect.rs`): `ParamRingBuffer` with `UnsafeCell<Vec<ParamChange>>` and `AtomicU64` read/write indices, power-of-2 sized. `set_parameter()` pushes to ring (non-blocking), `process_inner()` drains ring into CLAP events. Eliminates lock contention on `pending_params`.
+- **Kahn VecDeque + binary search elimination** (`stream.rs`): `KAHN_QUEUE` changed to `VecDeque` (`pop_front()` O(1) vs `remove(0)` O(n)). 5 `binary_search()` calls replaced with O(1) `HashMap` lookups via `GROUP_TO_POS`/`RETURN_TO_POS` thread-locals.
+- **Clippy cleanup**: 97 warnings + 1 error → 0 across the codebase.
+
 ## v0.7.0 Changes (GUI Performance + Mixer Fixes + Clip Operations)
 
 ### Audio Engine Performance
