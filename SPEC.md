@@ -2,7 +2,7 @@
 
 ## 1. Project Overview
 
-**HDAW** (Hap's Digital Audio Workstation) - A traditional linear DAW similar to Pro Tools/Cubase, built in Rust with Slint for the UI.
+**HDAW** (Holofonic Digital Audio Workstation) - A traditional linear DAW similar to Pro Tools/Cubase, built in Rust with egui for the UI.
 
 ### Core Philosophy
 - Single-window application with persistent panels (not tabbed)

@@ -1,4 +1,4 @@
-# HDAW — Hap's Digital Audio Workstation
+# HDAW — Holofonic Digital Audio Workstation
 
 A lightweight, native digital audio workstation built in Rust with real-time audio processing and an immediate-mode GUI.
 
