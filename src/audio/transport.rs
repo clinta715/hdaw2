@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 fn pack_loop_region(loop_in: u64, loop_out: u64) -> u64 {
-    (loop_out << 32) | (loop_in & 0xFFFF_FFFF)
+    ((loop_out & 0xFFFF_FFFF) << 32) | (loop_in & 0xFFFF_FFFF)
 }
 
 fn unpack_loop_region(packed: u64) -> (u64, u64) {

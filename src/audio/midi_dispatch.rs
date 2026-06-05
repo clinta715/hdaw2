@@ -40,8 +40,14 @@ pub fn dispatch_midi(
         return Some(ii);
     }
 
-    if let EffectKind::Clap(adapter) = &handle.fx_chain[ii].kind {
-        if let Ok(mut a) = adapter.try_lock() {
+        if let EffectKind::Clap(adapter) = &handle.fx_chain[ii].kind {
+            let mut a = match adapter.try_lock() {
+                Ok(g) => g,
+                Err(e) => match e {
+                    std::sync::TryLockError::Poisoned(p) => p.into_inner(),
+                    std::sync::TryLockError::WouldBlock => return Some(ii),
+                },
+            };
             if seek_occurred {
                 a.reset();
             }
@@ -171,10 +177,7 @@ pub fn dispatch_midi(
                     );
                 }
             });
-        } else {
-            adapter.lock().ok();
         }
-    }
 
     Some(ii)
 }

@@ -380,7 +380,7 @@ pub fn handle_interaction(
                         let bpm = app.project.bpm;
                         new_pos = app.timeline_state.snap_frames_to_grid(new_pos, sr, bpm, &app.preferences, &app.project.markers);
                     }
-                    app.update_clip_position(drag.track_index, drag.clip_id, new_pos);
+                    app.update_clip_position(drag.original_track_index, drag.clip_id, new_pos);
                     // Update target track based on mouse Y
                     if let Some(new_ti) = track_idx_from_y(&track_ys, pos.y, track_height) {
                         if new_ti < app.project.tracks.len() {
@@ -566,7 +566,7 @@ pub fn handle_interaction(
 
                 if response.double_clicked() {
                     if matches!(clip_kind, ClipKind::Midi(_)) {
-                        app.show_piano_roll = true;
+                        app.main_view = crate::app::MainView::PianoRoll;
                         app.editing_midi_clip_id = Some(clip_id);
                     }
                     return;

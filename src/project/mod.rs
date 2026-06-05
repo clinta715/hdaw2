@@ -31,6 +31,12 @@ pub struct Project {
     pub tempo_events: Vec<TempoEvent>,
     #[serde(default)]
     pub time_sig_events: Vec<TimeSigEvent>,
+    #[serde(default)]
+    pub loop_in_frames: u64,
+    #[serde(default)]
+    pub loop_out_frames: u64,
+    #[serde(default)]
+    pub loop_enabled: bool,
 }
 
 impl Project {
@@ -47,6 +53,9 @@ impl Project {
             audio_pool: Vec::new(),
             tempo_events: Vec::new(),
             time_sig_events: Vec::new(),
+            loop_in_frames: 0,
+            loop_out_frames: 0,
+            loop_enabled: false,
         }
     }
 

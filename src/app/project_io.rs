@@ -1,10 +1,11 @@
-use crate::app::HdawApp;
+use crate::app::{HdawApp, MainView};
 use crate::app::project_service;
 use crate::project::clip::{AudioClip, ClipKind};
 use crate::project::clip_handle::ClipHandle;
 use crate::project::track::{Track, TrackHandle};
 use egui_file_dialog::FileDialog;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 
 impl HdawApp {
     pub fn import_audio(&mut self) {
@@ -107,6 +108,10 @@ impl HdawApp {
         if let Ok(tracks) = self.engine.tracks.lock() {
             project_service::sync_engine_to_project(&mut self.project, &tracks);
         }
+        let (loop_in, loop_out) = self.engine.transport.load_loop_region();
+        self.project.loop_in_frames = loop_in;
+        self.project.loop_out_frames = loop_out;
+        self.project.loop_enabled = self.engine.transport.loop_enabled.load(Ordering::Acquire);
     }
 
     pub fn new_project(&mut self) {
@@ -130,6 +135,8 @@ impl HdawApp {
         self.mark_saved();
         self.midi_thumb_cache.clear();
         self.waveform_cache.clear();
+        self.main_view = MainView::Arrange;
+        self.editing_midi_clip_id = None;
     }
 
     pub fn save_current_project(&mut self, path: &str) -> Result<(), String> {
@@ -156,6 +163,9 @@ impl HdawApp {
         if let Ok(mut tracks) = self.engine.tracks.lock() {
             *tracks = engine_tracks;
         }
+
+        self.engine.transport.set_loop_region(self.project.loop_in_frames, self.project.loop_out_frames);
+        self.engine.transport.loop_enabled.store(self.project.loop_enabled, Ordering::Release);
 
         self.current_path = Some(PathBuf::from(path));
         Ok(())

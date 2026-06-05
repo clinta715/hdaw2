@@ -22,12 +22,33 @@ pub enum UnsavedChangesAction {
     OpenProject,
     CloseApp,
 }
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum MainView {
+    Arrange,
+    PianoRoll,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum RightPanelMode {
+    Browser,
+    ClipInfo,
+    EffectDetail,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum BottomPanelMode {
+    Mixer,
+    Sends,
+    FxChain,
+}
 use crate::ui::audio_pool::AudioPoolPanelState;
+use crate::ui::bottom_panel::MixerPanelState;
 use crate::ui::effect_editor::EffectEditorState;
-use crate::ui::mixer_panel::MixerPanelState;
 use crate::ui::panels::PanelManager;
 use crate::ui::piano_roll_state::PianoRollState;
 use crate::ui::preferences::PreferencesState;
+use crate::ui::timeline::{compute_track_y_positions, track_idx_from_y};
 use crate::ui::timeline::TimelineState;
 use crate::ui::toolbar::ToolbarState;
 use crate::app::undo_service::UndoService;
@@ -112,9 +133,11 @@ pub struct HdawApp {
     pub show_instrument_dialog: bool,
     pub show_about: bool,
     pub show_shortcuts: bool,
-    pub show_piano_roll: bool,
+    pub main_view: MainView,
     pub piano_roll_state: PianoRollState,
     pub editing_midi_clip_id: Option<Uuid>,
+    pub right_panel_mode: RightPanelMode,
+    pub bottom_panel_mode: BottomPanelMode,
     pub undo_service: UndoService,
     pub confirm_unsaved: Option<UnsavedChangesAction>,
     pub pending_after_save: Option<UnsavedChangesAction>,
@@ -183,9 +206,11 @@ impl HdawApp {
             show_instrument_dialog: false,
             show_about: false,
             show_shortcuts: false,
-            show_piano_roll: false,
+            main_view: MainView::Arrange,
             piano_roll_state: PianoRollState::default(),
             editing_midi_clip_id: None,
+            right_panel_mode: RightPanelMode::Browser,
+            bottom_panel_mode: BottomPanelMode::Mixer,
             undo_service: UndoService::new(),
             confirm_unsaved: None,
             pending_after_save: None,
@@ -210,6 +235,7 @@ impl HdawApp {
 
         app.scan_plugins();
         app.add_blank_track();
+        app.mark_saved();
         app
     }
 
@@ -637,6 +663,7 @@ impl HdawApp {
         self.undo_service.push(crate::app::undo::UndoCommand::RecordAudio {
             track_indices: track_indices.clone(),
             clip_ids: engine_clip_ids,
+            clip_kind: clip_kind.clone(),
         });
 
         // Disarm all tracks
@@ -689,7 +716,8 @@ impl HdawApp {
             return;
         }
         let sr = self.engine.transport.sample_rate();
-        let track_index = ((pos.y - rect.top() - 20.0) as f64 - self.timeline_state.scroll_y) as usize / (track_height as usize);
+        let track_ys = compute_track_y_positions(rect, self, track_height);
+        let track_index = track_idx_from_y(&track_ys, pos.y, track_height).unwrap_or(usize::MAX);
         if track_index >= self.project.tracks.len() {
             self.audio_pool_state.dragging_clip_id = None;
             return;

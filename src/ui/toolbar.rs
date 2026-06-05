@@ -37,6 +37,7 @@ pub struct ToolbarAction {
     pub export_clicked: bool,
     pub about_clicked: bool,
     pub shortcuts_clicked: bool,
+    pub arrange_clicked: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -57,6 +58,7 @@ pub fn render(
     has_selected_track: bool,
     pool_visible: bool,
     has_instruments: bool,
+    show_arrange: bool,
     recent_files: &[std::path::PathBuf],
 ) -> ToolbarAction {
     let mut action = ToolbarAction::default();
@@ -301,6 +303,11 @@ pub fn render(
 
             // Panel Toggles (Right Aligned)
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if show_arrange {
+                    if ui.add(egui::Button::new("Arrange").selected(true)).clicked() {
+                        action.arrange_clicked = true;
+                    }
+                }
                 if ui.add(egui::Button::new("FX").selected(false)).clicked() {
                     action.fx_clicked = true;
                 }

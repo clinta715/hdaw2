@@ -263,8 +263,12 @@ pub fn render(ui: &mut Ui, app: &mut HdawApp) {
     if response.double_clicked_by(egui::PointerButton::Primary) {
         if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
             if pos.x > rect.left() + header_width {
-                let track_y_index = ((pos.y - rect.top() - RULER_HEIGHT - app.timeline_state.scroll_y as f32) / track_height) as i32;
-                if track_y_index >= app.track_ui.len() as i32 {
+                let track_ys = compute_track_y_positions(&rect, app, track_height);
+                let last_bottom = track_ys.iter().enumerate()
+                    .filter_map(|(i, ty)| ty.map(|y| y + track_height + expanded_extra_for_track(app, i)))
+                    .next_back()
+                    .unwrap_or(rect.top() + RULER_HEIGHT + app.timeline_state.scroll_y as f32);
+                if pos.y > last_bottom {
                     app.add_blank_track();
                 }
             }
@@ -714,10 +718,14 @@ fn handle_zoom_and_scroll(ui: &Ui, response: &Response, rect: &Rect, app: &mut H
 }
 
 fn clamp_scroll_y(rect: &Rect, app: &mut HdawApp, track_height: f32) {
-    let max_scroll = (app.track_ui.len() as f64 * track_height as f64
-        - rect.height() as f64
-        + RULER_HEIGHT as f64)
-        .max(0.0);
+    let track_ys = compute_track_y_positions(rect, app, track_height);
+    let initial_y = rect.top() + RULER_HEIGHT + app.timeline_state.scroll_y as f32;
+    let total_content_height = track_ys.iter().enumerate()
+        .filter_map(|(i, ty)| ty.map(|y| y + track_height + expanded_extra_for_track(app, i)))
+        .next_back()
+        .map(|last_bottom| last_bottom - initial_y)
+        .unwrap_or(0.0);
+    let max_scroll = (total_content_height as f64 - rect.height() as f64 + RULER_HEIGHT as f64).max(0.0);
     app.timeline_state.scroll_y = app
         .timeline_state
         .scroll_y

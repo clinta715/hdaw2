@@ -194,11 +194,15 @@ pub fn process_track(
                     effect.process(&mut mix_l, &mut mix_r, sample_rate);
                 }
                 EffectKind::Clap(adapter) => {
-                    if let Ok(mut a) = adapter.try_lock() {
-                        a.process(&mut mix_l, &mut mix_r, sample_rate);
-                    } else {
-                        #[allow(clippy::mut_mutex_lock)]
-                        adapter.lock().ok();
+                    match adapter.try_lock() {
+                        Ok(mut a) => a.process(&mut mix_l, &mut mix_r, sample_rate),
+                        Err(e) => match e {
+                            std::sync::TryLockError::Poisoned(p) => {
+                                let mut a = p.into_inner();
+                                a.process(&mut mix_l, &mut mix_r, sample_rate);
+                            }
+                            std::sync::TryLockError::WouldBlock => {}
+                        },
                     }
                 }
             }

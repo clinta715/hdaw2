@@ -324,13 +324,21 @@ pub fn mix_tracks(
                                 effect.process(&mut g_l[gi], &mut g_r[gi], sample_rate);
                             }
                             EffectKind::Clap(adapter) => {
-                                if let Ok(mut a) = adapter.try_lock() {
-                                    let mut g_l = gl.borrow_mut();
-                                    let mut g_r = gr.borrow_mut();
-                                    a.process(&mut g_l[gi], &mut g_r[gi], sample_rate);
-                                } else {
-                                    #[allow(clippy::mut_mutex_lock)]
-                                    adapter.lock().ok();
+                                match adapter.try_lock() {
+                                    Ok(mut a) => {
+                                        let mut g_l = gl.borrow_mut();
+                                        let mut g_r = gr.borrow_mut();
+                                        a.process(&mut g_l[gi], &mut g_r[gi], sample_rate);
+                                    }
+                                    Err(e) => match e {
+                                        std::sync::TryLockError::Poisoned(p) => {
+                                            let mut a = p.into_inner();
+                                            let mut g_l = gl.borrow_mut();
+                                            let mut g_r = gr.borrow_mut();
+                                            a.process(&mut g_l[gi], &mut g_r[gi], sample_rate);
+                                        }
+                                        std::sync::TryLockError::WouldBlock => {}
+                                    },
                                 }
                             }
                         }
@@ -404,21 +412,27 @@ pub fn mix_tracks(
                         effect.process(&mut r_l[ri], &mut r_r[ri], sample_rate);
                     }
                     EffectKind::Clap(adapter) => {
-                        if let Ok(mut a) = adapter.try_lock() {
-                            let mut r_l = rl.borrow_mut();
-                            let mut r_r = rr.borrow_mut();
-                            a.process(&mut r_l[ri], &mut r_r[ri], sample_rate);
-                        } else {
-                            #[allow(clippy::mut_mutex_lock)]
-                            adapter.lock().ok();
+                        match adapter.try_lock() {
+                            Ok(mut a) => {
+                                let mut r_l = rl.borrow_mut();
+                                let mut r_r = rr.borrow_mut();
+                                a.process(&mut r_l[ri], &mut r_r[ri], sample_rate);
+                            }
+                            Err(e) => match e {
+                                std::sync::TryLockError::Poisoned(p) => {
+                                    let mut a = p.into_inner();
+                                    let mut r_l = rl.borrow_mut();
+                                    let mut r_r = rr.borrow_mut();
+                                    a.process(&mut r_l[ri], &mut r_r[ri], sample_rate);
+                                }
+                                    std::sync::TryLockError::WouldBlock => {}
+                                },
+                            }
                         }
                     }
                 }
             }
-        }
-
-        // Route to master
-        let r_l = rl.borrow();
+            let r_l = rl.borrow();
         let r_r = rr.borrow();
         for s in 0..frames {
             out_l[s] += r_l[ri][s];
@@ -525,50 +539,309 @@ pub fn render_export(
     const CHUNK: usize = 1024;
 
     SCRATCH_L.with(|sl| {
-        SCRATCH_R.with(|sr| {
-            let mut out_l = sl.borrow_mut();
-            let mut out_r = sr.borrow_mut();
+    SCRATCH_R.with(|sr| {
+    GROUP_ACCUM_L.with(|gl| {
+    GROUP_ACCUM_R.with(|gr| {
+    RETURN_ACCUM_L.with(|rl| {
+    RETURN_ACCUM_R.with(|rr| {
+    GROUP_IDXS.with(|gi| {
+    RETURN_IDXS.with(|ri| {
+    GROUP_TO_POS.with(|gtp| {
+    RETURN_TO_POS.with(|rtp| {
+    UUID_TO_IDX.with(|ui| {
+    let n_tracks = tracks.len();
+    let mut out_l = sl.borrow_mut();
+    let mut out_r = sr.borrow_mut();
 
-            let mut pos = start_frame as usize;
-            while pos < end_frame as usize {
-                let frames = CHUNK.min((end_frame as usize).saturating_sub(pos));
+    let mut group_indices = gi.borrow_mut();
+    let mut return_indices = ri.borrow_mut();
+    let mut uuid_to_idx = ui.borrow_mut();
+    group_indices.clear();
+    return_indices.clear();
+    uuid_to_idx.clear();
+    for (i, track) in tracks.iter().enumerate() {
+        if track.is_group {
+            group_indices.push(i);
+        } else if track.is_return {
+            return_indices.push(i);
+        }
+        uuid_to_idx.insert(track.id, i);
+    }
+    let n_groups = group_indices.len();
+    let n_returns = return_indices.len();
 
-                out_l.clear();
-                out_l.resize(frames, 0.0f32);
-                out_r.clear();
-                out_r.resize(frames, 0.0f32);
+    let mut group_to_pos = gtp.borrow_mut();
+    group_to_pos.clear();
+    for (pos, &ti) in group_indices.iter().enumerate() {
+        group_to_pos.insert(tracks[ti].id, pos);
+    }
+    drop(group_to_pos);
 
-                let any_solo = tracks.iter().any(|h| h.solo.load(Ordering::Acquire));
-                for handle in tracks.iter_mut() {
-                    let muted = handle.mute.load(Ordering::Acquire)
-                        || (any_solo && !handle.solo.load(Ordering::Acquire));
-                    if muted {
-                        continue;
-                    }
-                    process::process_track(handle, pos, frames, sample_rate, false);
-                    process::MIX_L.with(|ml| {
-                        process::MIX_R.with(|mr| {
-                            let mix_l = ml.borrow();
-                            let mix_r = mr.borrow();
-                            for i in 0..frames.min(mix_l.len()) {
-                                out_l[i] += mix_l[i];
-                                out_r[i] += mix_r[i];
-                            }
-                        });
-                    });
+    let mut return_to_pos = rtp.borrow_mut();
+    return_to_pos.clear();
+    for (pos, &ti) in return_indices.iter().enumerate() {
+        return_to_pos.insert(tracks[ti].id, pos);
+    }
+    drop(return_to_pos);
+
+    let mut pos = start_frame as usize;
+    while pos < end_frame as usize {
+        let frames = CHUNK.min((end_frame as usize).saturating_sub(pos));
+
+        out_l.clear();
+        out_l.resize(frames, 0.0f32);
+        out_r.clear();
+        out_r.resize(frames, 0.0f32);
+
+        // Resize group accumulators
+        let mut g_l = gl.borrow_mut();
+        let mut g_r = gr.borrow_mut();
+        g_l.resize(n_groups, Vec::new());
+        g_r.resize(n_groups, Vec::new());
+        for gi in 0..n_groups {
+            g_l[gi].clear();
+            g_l[gi].resize(frames, 0.0f32);
+            g_r[gi].clear();
+            g_r[gi].resize(frames, 0.0f32);
+        }
+
+        // Resize return accumulators
+        let mut r_l = rl.borrow_mut();
+        let mut r_r = rr.borrow_mut();
+        r_l.resize(n_returns, Vec::new());
+        r_r.resize(n_returns, Vec::new());
+        for ri in 0..n_returns {
+            r_l[ri].clear();
+            r_l[ri].resize(frames, 0.0f32);
+            r_r[ri].clear();
+            r_r[ri].resize(frames, 0.0f32);
+        }
+        drop(g_l);
+        drop(g_r);
+        drop(r_l);
+        drop(r_r);
+
+        let any_solo = tracks.iter().any(|h| h.solo.load(Ordering::Acquire));
+
+        // Pass 1: Source tracks (non-group, non-return)
+        #[allow(clippy::needless_range_loop)]
+        for i in 0..n_tracks {
+            let muted = {
+                let h = &tracks[i];
+                h.mute.load(Ordering::Acquire) || (any_solo && !h.solo.load(Ordering::Acquire))
+            };
+            if muted || tracks[i].is_group || tracks[i].is_return {
+                if muted {
+                    tracks[i].peak_left.store(0, Ordering::Release);
+                    tracks[i].peak_right.store(0, Ordering::Release);
                 }
-
-                master_bus.process(&mut out_l, &mut out_r);
-
-                for i in 0..frames {
-                    output.push(out_l[i]);
-                    output.push(out_r[i]);
-                }
-
-                pos += frames;
+                continue;
             }
-        });
-    });
+            process::process_track(&mut tracks[i], pos, frames, sample_rate, false);
+            process::MIX_L.with(|ml| {
+            process::MIX_R.with(|mr| {
+            process::PRE_FADER_L.with(|pfl| {
+            process::PRE_FADER_R.with(|pfr| {
+                let mix_l = ml.borrow();
+                let mix_r = mr.borrow();
+                let pre_l = pfl.borrow();
+                let pre_r = pfr.borrow();
+                let pg = tracks[i].parent_group;
+                if let Some(pid) = pg {
+                    if let Some(&gpos) = gtp.borrow().get(&pid) {
+                        let mut g_l = gl.borrow_mut();
+                        let mut g_r = gr.borrow_mut();
+                        for s in 0..frames {
+                            g_l[gpos][s] += mix_l[s];
+                            g_r[gpos][s] += mix_r[s];
+                        }
+                    }
+                } else {
+                    for s in 0..frames {
+                        out_l[s] += mix_l[s];
+                        out_r[s] += mix_r[s];
+                    }
+                }
+                for send in &tracks[i].sends {
+                    let send_level = f32::from_bits(send.level.load(Ordering::Acquire));
+                    if send_level < 0.001 { continue; }
+                    if let Some(&rpos) = rtp.borrow().get(&send.target_id) {
+                        let (src_l, src_r) = if send.pre_fader { (&*pre_l, &*pre_r) } else { (&*mix_l, &*mix_r) };
+                        let mut r_l = rl.borrow_mut();
+                        let mut r_r = rr.borrow_mut();
+                        for s in 0..frames {
+                            r_l[rpos][s] += src_l[s] * send_level;
+                            r_r[rpos][s] += src_r[s] * send_level;
+                        }
+                    }
+                }
+            });});});});
+        }
+
+        // Pass 2: Group tracks (topological order)
+        if n_groups > 0 {
+            IN_DEGREE.with(|id| {
+            CHILDREN.with(|ch| {
+            KAHN_QUEUE.with(|kq| {
+            let mut in_degree = id.borrow_mut();
+            let mut children = ch.borrow_mut();
+            let mut queue = kq.borrow_mut();
+            in_degree.clear();
+            in_degree.resize(n_groups, 0usize);
+            children.clear();
+            children.resize(n_groups, Vec::new());
+            for gi in 0..n_groups {
+                let g_idx = group_indices[gi];
+                let pg = tracks[g_idx].parent_group;
+                if let Some(pid) = pg {
+                    if let Some(&parent_gi) = gtp.borrow().get(&pid) {
+                        in_degree[parent_gi] += 1;
+                        children[gi].push(parent_gi);
+                    }
+                }
+            }
+            queue.clear();
+            for gi in 0..n_groups {
+                if in_degree[gi] == 0 { queue.push_back(gi); }
+            }
+            while !queue.is_empty() {
+                let gi = queue.pop_front().unwrap();
+                let g_idx = group_indices[gi];
+                let muted = {
+                    let h = &tracks[g_idx];
+                    h.mute.load(Ordering::Acquire) || (any_solo && !h.solo.load(Ordering::Acquire))
+                };
+                if !muted {
+                    for instance in tracks[g_idx].fx_chain.iter_mut() {
+                        if !instance.is_bypassed() {
+                            match &mut instance.kind {
+                                crate::audio::effects::dsp_effect::EffectKind::BuiltIn(effect) => {
+                                    let mut g_l = gl.borrow_mut();
+                                    let mut g_r = gr.borrow_mut();
+                                    effect.process(&mut g_l[gi], &mut g_r[gi], sample_rate);
+                                }
+                                crate::audio::effects::dsp_effect::EffectKind::Clap(adapter) => {
+                                    match adapter.try_lock() {
+                                        Ok(mut a) => {
+                                            let mut g_l = gl.borrow_mut();
+                                            let mut g_r = gr.borrow_mut();
+                                            a.process(&mut g_l[gi], &mut g_r[gi], sample_rate);
+                                        }
+                                        Err(e) => match e {
+                                            std::sync::TryLockError::Poisoned(p) => {
+                                                let mut a = p.into_inner();
+                                                let mut g_l = gl.borrow_mut();
+                                                let mut g_r = gr.borrow_mut();
+                                                a.process(&mut g_l[gi], &mut g_r[gi], sample_rate);
+                                            }
+                                            std::sync::TryLockError::WouldBlock => {}
+                                        },
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Route group output to parent or master
+                let pg = tracks[g_idx].parent_group;
+                let mut g_l = gl.borrow_mut();
+                let mut g_r = gr.borrow_mut();
+                if let Some(pid) = pg {
+                    if let Some(&parent_gi) = gtp.borrow().get(&pid) {
+                        for s in 0..frames {
+                            g_l[parent_gi][s] += g_l[gi][s];
+                            g_r[parent_gi][s] += g_r[gi][s];
+                        }
+                    }
+                } else {
+                    for s in 0..frames {
+                        out_l[s] += g_l[gi][s];
+                        out_r[s] += g_r[gi][s];
+                    }
+                }
+                drop(g_l);
+                drop(g_r);
+                for send in &tracks[g_idx].sends {
+                    let send_level = f32::from_bits(send.level.load(Ordering::Acquire));
+                    if send_level < 0.001 { continue; }
+                    if let Some(&rpos) = rtp.borrow().get(&send.target_id) {
+                        let mut r_l = rl.borrow_mut();
+                        let mut r_r = rr.borrow_mut();
+                        let g_l = gl.borrow();
+                        let g_r = gr.borrow();
+                        for s in 0..frames {
+                            r_l[rpos][s] += g_l[gi][s] * send_level;
+                            r_r[rpos][s] += g_r[gi][s] * send_level;
+                        }
+                    }
+                }
+                for &parent_gi in &children[gi] {
+                    in_degree[parent_gi] = in_degree[parent_gi].saturating_sub(1);
+                    if in_degree[parent_gi] == 0 && !queue.contains(&parent_gi) {
+                        queue.push_back(parent_gi);
+                    }
+                }
+            }
+            });});});
+        }
+
+        // Pass 3: Return tracks
+        for ri in 0..n_returns {
+            let r_idx = return_indices[ri];
+            let muted = {
+                let h = &tracks[r_idx];
+                h.mute.load(Ordering::Acquire) || (any_solo && !h.solo.load(Ordering::Acquire))
+            };
+            if muted { continue; }
+            for instance in tracks[r_idx].fx_chain.iter_mut() {
+                if !instance.is_bypassed() {
+                    match &mut instance.kind {
+                        crate::audio::effects::dsp_effect::EffectKind::BuiltIn(effect) => {
+                            let mut r_l = rl.borrow_mut();
+                            let mut r_r = rr.borrow_mut();
+                            effect.process(&mut r_l[ri], &mut r_r[ri], sample_rate);
+                        }
+                        crate::audio::effects::dsp_effect::EffectKind::Clap(adapter) => {
+                            match adapter.try_lock() {
+                                Ok(mut a) => {
+                                    let mut r_l = rl.borrow_mut();
+                                    let mut r_r = rr.borrow_mut();
+                                    a.process(&mut r_l[ri], &mut r_r[ri], sample_rate);
+                                }
+                                Err(e) => match e {
+                                    std::sync::TryLockError::Poisoned(p) => {
+                                        let mut a = p.into_inner();
+                                        let mut r_l = rl.borrow_mut();
+                                        let mut r_r = rr.borrow_mut();
+                                        a.process(&mut r_l[ri], &mut r_r[ri], sample_rate);
+                                    }
+                                    std::sync::TryLockError::WouldBlock => {}
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+            let r_l = rl.borrow();
+            let r_r = rr.borrow();
+            for s in 0..frames {
+                out_l[s] += r_l[ri][s];
+                out_r[s] += r_r[ri][s];
+            }
+        }
+
+        // Pass 4: Master bus
+        master_bus.process(&mut out_l, &mut out_r);
+
+        for i in 0..frames {
+            output.push(out_l[i]);
+            output.push(out_r[i]);
+        }
+
+        pos += frames;
+    }
+    });});});});});});});});});});});
 
     output
 }

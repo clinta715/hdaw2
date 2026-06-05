@@ -108,6 +108,7 @@ pub struct PreferencesState {
     pub show_effect_editor_on_start: bool,
     pub effect_panel_width: f32,
     pub mixer_panel_height: f32,
+    pub right_panel_width: f32,
     
     // Playhead / Scrolling
     pub follow_playhead: bool,
@@ -165,6 +166,7 @@ impl Default for PreferencesState {
             show_effect_editor_on_start: true,
             effect_panel_width: 280.0,
             mixer_panel_height: 220.0,
+            right_panel_width: 220.0,
             
             follow_playhead: true,
             piano_roll_follow_playhead: true,

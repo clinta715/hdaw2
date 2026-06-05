@@ -70,6 +70,6 @@ impl HostHandlers for HdawClapHost {
 }
 
 pub fn make_host_info() -> Result<HostInfo, HostError> {
-    HostInfo::new("HDAW", "HDAW", "https://github.com/clinta715/hdaw2", "0.4.0")
+    HostInfo::new("HDAW", "HDAW", "https://github.com/clinta715/hdaw2", "0.9.0")
         .map_err(HostError::from)
 }

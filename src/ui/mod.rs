@@ -1,10 +1,11 @@
 pub mod app_ui;
 pub mod audio_pool;
+pub mod bottom_panel;
 pub mod effect_editor;
-pub mod mixer_panel;
 pub mod panels;
 pub mod piano_roll;
 pub mod piano_roll_state;
 pub mod preferences;
+pub mod right_panel;
 pub mod timeline;
 pub mod toolbar;

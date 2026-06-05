@@ -24,11 +24,13 @@ pub enum UndoCommand {
         new_track_index: usize,
         old_position: u64,
         new_position: u64,
+        clip: ClipKind,
     },
     DuplicateClip {
         track_index: usize,
         clip_id: uuid::Uuid,
         new_clip_id: uuid::Uuid,
+        new_clip: ClipKind,
     },
     SplitClip {
         track_index: usize,
@@ -37,6 +39,7 @@ pub enum UndoCommand {
         old_length: u64,
         left_length: u64,
         right_length: u64,
+        right_clip: ClipKind,
     },
     GlueClips {
         track_index: usize,
@@ -151,6 +154,7 @@ pub enum UndoCommand {
     RecordAudio {
         track_indices: Vec<usize>,
         clip_ids: Vec<uuid::Uuid>,
+        clip_kind: ClipKind,
     },
     AddTrack {
         track_index: usize,

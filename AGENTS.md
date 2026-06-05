@@ -1,130 +1,57 @@
 # HDAW Architecture Guide for AI Agents
 
+## v0.9.0 Changes (Tiled Layout + Loop/Panel Persistence)
+
+### Tiled Layout (Ableton Live-style)
+- **Main view dispatch** (`app/mod.rs`, `app_ui.rs`): `MainView::Arrange | PianoRoll` enum replaces `show_piano_roll: bool`. `CentralPanel` dispatches based on `app.main_view`. Piano roll renders inline via `render_panel(ui, app)` instead of in a floating `Window`.
+- **Right panel** (`right_panel.rs`): New `SidePanel::right` with tabbed modes — Browser (audio pool), Clip Info, Effect Detail. Width saved to `preferences.right_panel_width` via `PanelResponse.response.rect.width()`.
+- **Bottom panel** (`bottom_panel.rs`): New `TopBottomPanel::bottom` replacing `mixer_panel.rs`. Tabs for Mixer, Sends, FX Chain. Mixer strips migrated from deleted `mixer_panel.rs`. Height saved to `preferences.mixer_panel_height`.
+- **`Panels` enum pruned** (`panels.rs`): `PianoRoll` and `Mixer` variants removed. Only floating panels remain (AudioPool, EffectEditor, Preferences).
+- **`mixer_panel.rs` deleted**: All mixer strip/draw_master/draw_channel/VU meter logic moved to `bottom_panel.rs`.
+
+### Loop Region Persistence
+- **Project model** (`project/mod.rs`): Added `loop_in_frames: u64`, `loop_out_frames: u64`, `loop_enabled: bool` — all `#[serde(default)]` for backward compat.
+- **Sync on save** (`project_io.rs`): `sync_engine_to_project()` copies loop region + enabled from engine transport to project.
+- **Restore on load** (`project_io.rs`): After loading project, restores `set_loop_region()` + `loop_enabled.store()` onto transport.
+
+### Panel Size Persistence
+- **Right panel width**: New `right_panel_width: f32` in `PreferencesState` (default 220.0). Read on render, saved every frame from `PanelResponse`.
+- **Bottom panel height**: Already stored in `mixer_panel_height` — no change needed.
+- **Auto-save on close**: `app_ui.rs` triggers `save_preferences()` on `ctx.input(|i| i.viewport().close_requested())` before any unsaved-changes dialog.
+
+### Bug Fixes
+- **Empty project save prompt**: Added `mark_saved()` after `add_blank_track()` in `HdawApp::new()`.
+- **Piano roll window growth**: Cached `initial_window_size` via `get_or_insert_with()`, added `.min_size(400, 300)`.
+
 ## v0.8.0 Changes (Expanded Track View + Audio Engine Performance)
 
 ### Expanded Track View
-- **Track expand button** (`track_headers.rs`): ⇕ button on track header toggles `app.expanded_track: Option<usize>`. When expanded, the track gets extra vertical space below with stacked automation lanes and velocity lane.
-- **Stacked automation lanes** (`mod.rs`): Each automation lane renders as a 60px row in the expanded area, using `automation::draw_lane()` with per-lane labels. Supports Volume, Pan, and effect-param lanes.
-- **Velocity lane** (`mod.rs`): 60px lane showing MIDI note velocity bars along the timeline. Click-drag to edit velocity with full undo via `UpdateMidiNote`.
-- **Variable-height track Y positions** (`mod.rs`, `interaction.rs`, `clips.rs`, `auto_interaction.rs`): `compute_track_y_positions()`/`track_idx_from_y()` helpers replace the old `idx * track_height` formula. All interaction handlers (clip drag/trim/seam-click, header clicks, auto point drag) now use running Y offset that accounts for expanded extra height and hidden-by-collapse tracks.
-- **`RULER_HEIGHT`/`LANE_ROW_HEIGHT`/`VELOCITY_LANE_HEIGHT`/`expanded_extra_for_track`**: Made `pub` for cross-module use.
-
-### Audio Engine Performance  
-- **SPSC lock-free parameter pipeline** (`param_ring.rs`, `clap_effect.rs`): `ParamRingBuffer` with `UnsafeCell<Vec<ParamChange>>` and `AtomicU64` read/write indices, power-of-2 sized. `set_parameter()` pushes to ring (non-blocking), `process_inner()` drains ring into CLAP events. Eliminates lock contention on `pending_params`.
-- **Kahn VecDeque + binary search elimination** (`stream.rs`): `KAHN_QUEUE` changed to `VecDeque` (`pop_front()` O(1) vs `remove(0)` O(n)). 5 `binary_search()` calls replaced with O(1) `HashMap` lookups via `GROUP_TO_POS`/`RETURN_TO_POS` thread-locals.
-- **Clippy cleanup**: 97 warnings + 1 error → 0 across the codebase.
-
-## v0.7.0 Changes (GUI Performance + Mixer Fixes + Clip Operations)
+- **Track expand button** (`track_headers.rs`): ⇕ button on track header toggles `app.expanded_track: Option<usize>`.
+- **Stacked automation lanes** (`mod.rs`): 60px rows for Volume, Pan, effect-param lanes.
+- **Velocity lane** (`mod.rs`): 60px MIDI note velocity bars along timeline. Click-drag to edit with undo via `UpdateMidiNote`.
+- **Variable-height track Y positions**: `compute_track_y_positions()`/`track_idx_from_y()` helpers replace fixed `idx * track_height`.
 
 ### Audio Engine Performance
-- **Thread-local scratch buffers** (`stream.rs`): 6 heap allocations per audio callback eliminated — `group_indices`, `return_indices`, `uuid_to_idx` HashMap, `in_degree`, `children`, `queue` all moved to `thread_local!` buffers that reuse memory via `clear()` + `resize()`/`extend()`. Previously these were `collect()`ed fresh every callback.
-- **`catch_unwind` in audio callback** (`stream.rs`): Audio callback wrapped in `std::panic::catch_unwind` with `AssertUnwindSafe`. Prevents panics from unwinding through the C FFI boundary (undefined behavior). On panic: fills with silence, sets rebuild flag. Also recovers from Mutex poisoning (`tracks.lock().ok()`) so the audio callback can resume on the next frame instead of being permanently stuck.
-- **Non-blocking `try_set_parameter`** (`clap_effect.rs`, `dsp_effect.rs`, `automation_proc.rs`): `evaluate_effect_params` now calls `try_set_parameter()` instead of `set_parameter()`. Uses `pending_params.try_lock()` (non-blocking) instead of `adapter.lock()` (blocking). Audio thread never stalls on UI-held locks.
-- **`pending_params` cap** (`clap_effect.rs`): Vec capped at 1024 entries to prevent unbounded growth if `try_lock()` fails repeatedly.
-- **Mutex poison recovery**: Every `try_lock()` in the audio callback path (`stream.rs`, `engine.rs`, `midi_dispatch.rs`, `process.rs`) now has an `else` branch with `lock().ok()` to recover from poisoned mutexes. Prevents the "fizzle out → cursor freezes → can't restart" cascade.
-
-### GUI Performance
-- **Clip mixing overlap-range optimization** (`process.rs`): Clip mixing loop now computes `overlap_start`/`overlap_end` between buffer and clip, iterates only the overlap range. Eliminates per-frame boundary checks.
-- **MIDI post-processing merge** (`midi_dispatch.rs`): Clamping + output detection + volume multiply merged from 3 loops into 1 pass over the buffers.
-- **Metronome sine table** (`stream.rs`): Pre-computed `METRONOME_SIN_TABLE` thread-local, avoids `sin()` calls per sample in the audio thread.
-- **Scroll areas for all popup windows**: `Preferences`, `Effect Editor`, `Select Effect`, `Select Instrument`, `Keyboard Shortcuts` all wrapped in `egui::ScrollArea::vertical()`. Prevents wheel events from passing through to the main timeline. Keyboard Shortcuts window made resizable.
-- **Mouse wheel routing**: Timeline `handle_zoom_and_scroll` and piano roll scroll handler both check pointer position against their own rect before consuming scroll events — prevents sub-windows from stealing wheel events from each other.
-- **GUI hardcoded sizes → named constants** (Phase 2): Added 23 new constants across 8 files. See the table in [v0.6.0](#v060-changes-midi-pipeline-fixes--ui-polish) for the full list.
-
-### Mixer Panel Fixes
-- **Master volume slider now works** (`mixer_panel.rs`): Previously `app_ui.rs` overwrote the slider's value with the engine's value every frame. Now `draw_master` returns the new value and `render` syncs it to the engine only on change.
-- **Channel volume synced to project model** (`mixer_panel.rs`): Volume slider now writes to `project.tracks[index].volume` so changes persist on save/reload.
-- **Send index mapping by UUID** (`mixer_panel.rs`): Send names now looked up by `target_id` from `SendSlotDef`, not by position index. Survives return track reordering/deletion.
-- **`TrackUiState` clone optimized** (`mixer_panel.rs`): Full clone moved from per-channel to once in `render`, passed as `&[TrackUiState]` slice.
-- **Return names truncated** (`mixer_panel.rs`): Send slider labels truncated to 6 chars to fit 70px channel width.
-
-### Clip Operations (Right-Click Context Menu)
-- **Right-click on any clip** (`clips.rs`): Opens context menu with Copy, Paste, Duplicate, Glue, Delete, Rename.
-- **Copy/Paste** (`mod.rs`, `commands.rs`): `app.clipboard: Option<ClipKind>` stores the copied clip. Paste places it at the playhead position on the same track. Creates engine `ClipHandle` for audio or MIDI as appropriate.
-- **Duplicate** (`commands.rs`): Clones clip right after the original's end position. Full undo support via `DuplicateClip` variant.
-- **Rename** (`mod.rs`): Inline rename dialog with text input + Enter/OK to apply.
-- **Split at playhead** (`commands.rs`, `input.rs`): `S` key splits the selected clip at the playhead position. Creates two clips: left retains original offset with trimmed length, right is a new clip placed at the split point. MIDI notes are split between the two clips based on `start_frame`.
-- **Glue (Cubase-style seam click)** (`clips.rs`, `commands.rs`): Primary-click within 6px of the boundary between two adjacent clips merges them. Also available in right-click menu (glues with the next clip). Audio clips concatenate buffers; MIDI clips combine notes with adjusted `start_frame`. Undo via `GlueClips` variant.
-- **Cross-track clip dragging** (`clips.rs`, `interaction.rs`, `commands.rs`): Drag handling moved outside the track-iteration loop so clips track the mouse across tracks. `DragState` gets `original_track_index`. On drag end, calls `move_clip_to_track()` if the track changed. Undo via `MoveClipToTrack` variant.
-
-### Unsaved Changes Robustness
-- **Checkpoint-based dirty detection** (`mod.rs`, `project_io.rs`, `input.rs`, `app_ui.rs`): Replaced `undo_service.can_undo()` with `has_unsaved_changes()` which compares current undo stack index to `saved_at_undo_index`. Updated on every save, new project, load, and Don't Save. Prevents false prompts in fresh projects.
-
-### v0.6.0 Changes (MIDI Pipeline Fixes + UI Polish)
-
-### MIDI → CLAP → Audio Pipeline Bugs Fixed
-- **NoteOn offset 1 during seek** (`midi_dispatch.rs`): Both NoteOff and NoteOn were at offset 0 during seek. `EventBuffer::sort()` uses `sort_unstable_by_key`, which can reorder equal-key events. NoteOn is now at offset 1 so NoteOff(0) always comes first. **Critical**: any code that appends events to the same `EventBuffer` at the same offset risks reordering — always bump one event by 1 sample when ordering matters.
-- **Clip-end NoteOff never sent** (`midi_dispatch.rs`): When `clip_end == buf_end`, the condition `clip_end < buf_end` was false, so the clip-end NoteOff was skipped entirely. Changed to `clip_end <= buf_end` and offset to `clip_end.saturating_sub(1).saturating_sub(buf_start)` (last sample before clip_end). Verified via integration test — output decays to ~0.00001 after NoteOff vs ~0.118 without.
-- **Stop resets CLAP via `seek_occurred`** (`transport.rs`): `stop()` now sets `seek_occurred = true`. Without this, Play/Stop cycles left the CLAP plugin's internal voices ringing — new NoteOn events piled on top of old sustained notes, causing progressive CPU saturation after a few cycles. The fix leverages the existing seek path: next Play triggers `a.reset()` which kills all voices via the audio thread.
-
-### Note Drag/Delete Fixes
-- **`update_midi_note` no longer sorts** (`commands.rs`): Removing `sort_by_key(|n| n.start_frame)` from `update_midi_note`. The sort changed note indices mid-drag, causing `note_idx` in the drag target to point to the wrong note on subsequent frames. Note order in `Vec<MidiNote>` doesn't affect playback (MIDI dispatch iterates all, event buffer sorts by offset) or display (notes drawn individually).
-- **Right-click deletion uses `secondary_clicked()`** (`piano_roll.rs`): `response.clicked()` only fires for primary button clicks. The old `secondary_down()` check inside was dead code — the enclosing `if clicked()` never ran for right-clicks. Now uses `response.clicked_by(PointerButton::Secondary)` as a separate handler.
-
-### UI Quality of Life
-- **Unsaved changes prompt**: `UnsavedChangesAction` enum + `confirm_unsaved`/`pending_after_save`/`pending_open_path` fields on `HdawApp`. Intercepts New/Open/Close when `undo_service.can_undo()` is true. Centered dialog with Save / Don't Save / Cancel. On Save, saves then executes pending action. On Don't Save, clears undo stack first (prevents infinite re-prompt loop).
-- **Recent files list**: `recent_files: Vec<PathBuf>` in `PreferencesState` (persisted in `preferences.ron`). Dedup'd, capped at 10, shown in File → Recent Files submenu. "Clear Recent" option. Updated on every save/open.
-- **About dialog**: Help → About HDAW with credits: "Written by Clint Anderson (clinta@gmail.com) and DeepSeek, MiniMax, and GLM".
-- **Multi-column plugin lists**: Instrument/effect selection dialogs use `horizontal_wrapped` layout so long lists flow into multiple columns instead of one tall scrollable column. Windows are `resizable(true)` so users can widen them.
-- **Plugin name truncation**: Helper `truncate(s, max)` added to `app_ui.rs`, `effect_editor/mod.rs`, `timeline/mod.rs`. Cuts names >35 chars with `…` ellipsis (char-aware, not byte-indexed).
-- **Piano roll size from viewport**: Default size computed as 80% x 70% of `ctx.available_rect()`, with 400x300 floor. Adapts to any screen size/DPI. Toolbar uses `horizontal_wrapped` to prevent window expansion jitter.
-
-### GUI Hardcoded Sizes → Named Constants
-All magic numbers in UI code have been extracted to file-level `const` declarations:
-
-| Constant | Value | Files |
-|----------|-------|-------|
-| `BTN_SIZE` | `vec2(30.0, 24.0)` | toolbar.rs |
-| `RECORD_FONT_SIZE` | 14.0 | toolbar.rs |
-| `TIME_FONT_SIZE` | 16.0 | toolbar.rs |
-| `CHANNEL_WIDTH` | 70.0 | mixer_panel.rs |
-| `MIXER_MIN_HEIGHT` | 160.0 | mixer_panel.rs |
-| `NOTE_NAME_FONT_SIZE` | 9.0 | piano_roll.rs |
-| `LANE_LABEL_FONT_SIZE` | 9.0 | piano_roll.rs |
-| `CC_CIRCLE_RADIUS` | 3.0 | piano_roll.rs |
-| `CC_HIT_RADIUS` | 6.0 | piano_roll.rs |
-| `CLIP_LABEL_SIZE` | 10.0 | clips.rs |
-| `FADE_HANDLE_SIZE` | 10.0 | clips.rs |
-| `EDGE_HIT` | 6.0 | clips.rs |
-| `FADE_HIT_AREA` | 14.0 | clips.rs |
-| `BODY_FONT_SIZE` | 11.0 | track_headers.rs |
-| `SMALL_FONT_SIZE` | 9.0 | track_headers.rs |
-| `INFO_FONT_SIZE` | 8.5 | track_headers.rs |
-| `RULER_FONT_SIZE` | 10.0 | ruler.rs |
-| `MARKER_FONT_SIZE` | 9.0 | ruler.rs |
-| `GRAPH_HEIGHT` | 120.0 | eq_graph.rs |
-| `GRAPH_MARGIN` | 8.0 | eq_graph.rs |
-| `LABEL_FONT_SIZE` | 8.0 | eq_graph.rs |
-| `NUM_SAMPLE_POINTS` | 200 | eq_graph.rs |
-| `FREQ_LABEL_WIDTH` | 30.0 | eq_graph.rs |
-
-All values are in egui logical pixels (DPI-scaled automatically). The change is purely about maintainability — every magic number is now findable, adjustable, and documented.
-
-### Integration Tests
-- New `tests/midi_pipeline_test.rs`: 4 tests exercising the full MIDI→CLAP→audio pipeline with a real CLAP instrument (Dexed FM synth). Tests: basic audio output, seek retrigger, clip-boundary NoteOff, and clip-end-aligned-with-buffer-boundary (regression test for the clip-end NoteOff bug). Run with `cargo test --test midi_pipeline_test -- --test-threads=1`.
+- **SPSC lock-free parameter pipeline** (`param_ring.rs`, `clap_effect.rs`): `ParamRingBuffer` with `UnsafeCell<Vec<ParamChange>>` and `AtomicU64` indices. Eliminates lock contention on `pending_params`.
+- **Kahn VecDeque + binary search elimination** (`stream.rs`): `pop_front()` O(1) vs `remove(0)` O(n). 5 `binary_search()` → `HashMap` lookups.
+- **Clippy cleanup**: 97 warnings + 1 error → 0.
 
 ## Core Architecture
 
 ### Dual-Model Sync (Critical Architectural Debt)
 Two parallel data models must be manually kept in sync:
-- **Project model** (`Project`, `Track`, `ClipKind::Audio(AudioClip) | ClipKind::Midi(MidiClip)`, `AutomationLane`) — serializable, used for save/load and UI display
-- **Engine model** (`TrackHandle`, `ClipHandle.midi_notes: Vec<MidiNote>`, `EffectInstance`) — real-time, uses atomics, used by audio callback
+- **Project model** (`Project`, `Track`, `ClipKind`, `AutomationLane`) — serializable, save/load
+- **Engine model** (`TrackHandle`, `ClipHandle.midi_notes`, `EffectInstance`) — real-time, atomics
 
-**Every operation that modifies a clip/track/effect must update BOTH models.** The sync is ad-hoc:
-- `app/commands.rs` — `update_clip_position`, `update_clip_trim`, `remove_selected_clip`, `add_midi_note`, `remove_midi_note`, `add_midi_clip`, `delete_track` touch both
-- `app/project_io.rs` — `sync_engine_to_project` reads engine → project for serialization (includes MIDI note sync); `load_audio_file` resamples to engine sample rate
-- `ui/timeline/auto_interaction.rs` — `sync_automation_to_project` copies engine auto points → project model (uses dirty flag)
-- `ui/effect_editor/` — all FX operations (`add_builtin_effect`, `add_clap_effect`, `remove_effect`, `write_bypass`, `write_param`) sync to project model via `engine_fx_to_serialized()` helper
-- MIDI clip editing updates both project `MidiClip.notes` and engine `ClipHandle.midi_notes` atomically for real-time playback
+**Every operation that modifies a clip/track/effect must update BOTH models.**
 
 ### Real-Time Audio Thread Rules
-- **NO heap allocations in audio callback.** Use `thread_local!` scratch buffers (`stream.rs`, `process.rs`, `clap_effect.rs`) that `resize()` instead of allocating new `Vec`.
-- **NO locks in audio callback.** Use `try_lock()` only. The UI uses blocking `lock()`.
-- Thread naming: `hdaw-audio` on Windows via `SetThreadDescription` (one-time in callback via `thread_local! Cell<bool>`).
-- ~19 `lock()` calls from UI code into the engine `Arc<Mutex<Vec<TrackHandle>>>` — lock contention risk.
+- **NO heap allocations in audio callback.** Use `thread_local!` scratch buffers that `resize()` instead of allocating.
+- **NO locks in audio callback.** Use `try_lock()` only. UI uses blocking `lock()`.
+- Thread naming: `hdaw-audio` on Windows via `SetThreadDescription`.
 
 ### Audio Pipeline
-`audio_callback()` → reads/clears `seek_occurred` → `stream::name_audio_thread()` → `stream::mix_tracks(seek_occurred)` (per-track: automation → clips → MIDI dispatch → FX chain → mix sum) → `master_bus.process()` → interleave to output
+`audio_callback()` → reads/clears `seek_occurred` → `stream::mix_tracks(seek_occurred)` (per-track: automation → clips → MIDI dispatch → FX chain → mix sum) → `master_bus.process()` → interleave to output
 
 ### Atomics for Real-Time Safety
 | Type | Use | Access |
@@ -133,228 +60,121 @@ Two parallel data models must be manually kept in sync:
 | `AtomicBool` | mute, solo, bypass, `seek_occurred` | `Ordering::Acquire`/`Release` |
 | `AtomicU64` | position frames, packed loop region | audio reads, UI writes |
 
-### CLAP Plugin Hosting Architecture
-- **Scanner** (`audio/clap_scanner.rs`): Discovers `.clap` plugin files in OS-standard directories, loads entry points via `clack_host::PluginEntry::load()`, extracts `PluginDescriptor` metadata (name, id, features, is_instrument)
-- **Host** (`audio/clap_host.rs`): Implements `HostHandlers` for `clack_host`, provides `HdawClapHost` with logging via `tracing`
-- **Plugin State** (`audio/clap_instance.rs`): `ClapPluginState` holds plugin metadata, parameter info/values, bypass state. Parameters bridged to HDAW's `AtomicU32` pattern for lock-free audio thread access
-- **Effect Adapter** (`audio/clap_effect.rs`): `ClapEffectAdapter` wraps a `ClapPluginState` behind `Mutex` for thread safety. Implements `Drop` (calls `deactivate()`). Uses `try_lock()` on `pending_params` in `process_inner()`. `process()` calls `process_inner()` with `InputEvents::empty()`, `process_with_events()` passes caller-supplied events. Detects note-input capability via `PluginNotePorts` extension query at load time. Thread-local `COMBINED_EVENTS` buffer for merging pending + input events.
-- **EffectKind enum** in `dsp_effect.rs`: `EffectInstance.kind` is either `BuiltIn(Box<dyn DspEffect>)` or `Clap(Mutex<ClapEffectAdapter>)`. All `EffectInstance` methods dispatch based on variant. CLAP variant uses poison-safe `lock_clap()`/`lock_clap_mut()` helpers.
-- **Transport**: Play/Pause/Stop — `pause()` preserves position, `stop()` resets to zero. `Space` = play/pause toggle
-- **EffectType** has a `Clap { plugin_id, path }` variant for serialized CLAP plugin references
-
 ### Transport Architecture
-- `Transport.playing: AtomicBool` — play/pause/stop via `play()`, `pause()`, `stop()`
-- **Play** sets `playing=true`
-- **Pause** sets `playing=false` (preserves position)
-- **Stop** sets `playing=false` AND resets position to 0 AND sets `seek_occurred=true`. The seek flag triggers `a.reset()` on the next Play (kills all CLAP plugin voices). Without this, Play/Stop cycles caused progressive note accumulation in the plugin.
-- `loop_region: AtomicU64` — packed as (loop_out << 32) | loop_in to avoid torn reads
-- `seek_occurred: AtomicBool` — set by `seek_to_frame()` and `stop()`, cleared once per audio callback via `swap(false, Acquire)`. Triggers NoteOff for all active notes + CLAP reset on next buffer.
-- UI triggers via `play_requested`, `pause_requested`, `stop_requested` flags
-
-### Automation Architecture
-- `AutomationLane` in both project and engine models
-- Volume + Pan lanes auto-created per track (sentinel IDs `PARAM_VOLUME`, `PARAM_PAN`)
-- `process_track()` evaluates automation per buffer using `get_value_at(pos)`
-- f32::NAN from empty lane = use manual atomic value
-- Local-override: automation curves don't overwrite atomics; result used locally per buffer
-- **Dirty flag pattern**: `AutomationLane.dirty: bool` (`#[serde(skip)]`) — set on mutation (`add_point`, `remove_point`, drag), checked by `sync_automation_to_project` to skip redundant deep-clones
-
-### Audio Routing Architecture (Phase 5)
-- **Track types**: Normal (source clips), Group (accumulator busses), Return (send FX busses)
-- **Data model**: `SendSlot` on `TrackHandle` (engine), `SendSlotDef` on `Track` (project); `parent_group: Option<Uuid>`, `is_group: bool`, `is_return: bool`
-- **Multi-pass pipeline** in `mix_tracks()`:
-  - **Pass 1 (Source)**: Process normal tracks via `process_track()`, route post-fader to master or group accumulators, route sends to return accumulators
-  - **Pass 2 (Group)**: Kahn's algorithm for topological group processing (child before parent), apply FX chain on group accumulators, route to master or parent group
-  - **Pass 3 (Return)**: Apply FX chain on return accumulators, route to master
-  - **Pass 4 (Master+Metronome)**: `master_bus.process()` + metronome click → interleave to output
-- **Pre-fader sends**: Copy raw clip sum (`PRE_FADER_L/R`) before track volume/pan/FX
-- **Post-fader sends**: Copy after track volume/pan/FX chain
-- **Group accelerators**: per-group `Vec<f32>` accumulators in thread-local `GROUP_ACCUM_L/R`
-- **Return accelerators**: per-return `Vec<f32>` accumulators in thread-local `RETURN_ACCUM_L/R`
-- **Cycle detection**: DFS following `parent_group` links from target, rejecting if source track UUID is encountered
-- **Adding a return track** auto-creates `SendSlot` (level 0.0, post-fader) on every existing track + engine TrackHandle + TrackUiState
-- **Collapse**: Group tracks can be collapsed/expanded; child tracks hidden-by-collapse via parent-group chain walk in `render_tracks`
-- **Group color**: gold tint bg; **Return color**: purple tint bg; clips not drawn on group/return tracks
-- **Routing dropdown**: Mixer panel shows parent_group selector (groups + Master) and sends section (up to 4 visible sliders)
-
-### Effect Parameter Automation (Tier 2)
-- **Data model**: `AutomationLane.effect_instance_id: Option<Uuid>` with `#[serde(default)]` — links lane to a specific effect instance
-- **Lane lifecycle**: Created/destroyed via 'A' toggle button per parameter in effect editor; auto-deleted when effect is removed
-- **Audio evaluation**: `process_track()` iterates automation lanes with `effect_instance_id`, finds matching effect by UUID, calls `inst.set_parameter(lane.param_id, lane.get_value_at(pos_frames))` before the FX chain loop
-- **Parameter lookup**: Uses `lane.get_value_at()` directly (not param_id search) since the same param_id can appear in different effects; only evaluates if `!val.is_nan()`
-- **Undo**: `UndoCommand::RemoveEffect.removed_lanes: Vec<AutomationLane>` — both `apply_undo`/`apply_redo` restore lanes alongside the effect instance
-- **Lane color**: Per-lane color for effect-param lanes derived from UUID hash into a 5-color palette (distinct from green=volume, blue=pan)
-- **All lanes overlaid**: Effect-param lanes render overlaid in timeline alongside Volume and Pan (not stacked)
-
-### MIDI Architecture (v0.5.0)
-- **Data model**: `MidiNote` (pitch, velocity, release_velocity, start_frame, duration) + `CCEvent` (cc_number, time_frames, value) + `MidiClip` (id, name, position/length, notes, cc_events, color)
-- **ClipKind enum**: `ClipKind::Audio(AudioClip) | ClipKind::Midi(MidiClip)` unifies both clip types on the project model
-- **Engine model**: `ClipHandle.midi_notes: Vec<MidiNote>` + `ClipHandle.midi_cc_events: Vec<CCEvent>` — separate from audio data, empty for audio clips
-- **Playback**: `process_track()` scans `ClipHandle.midi_notes` in each clip, builds sorted `EventBuffer` of NoteOn/NoteOff + `MidiEvent::new()` for CC (raw MIDI 1.0 `[0xB0, cc_number, val_7bit]`), sends to the first note-capable CLAP effect via `process_with_events()`
-- **CC dispatch**: CC events in the current buffer window are pushed to the event buffer as `MidiEvent` with offset calculated from timeline position. Value is mapped from 0.0–1.0 float to 0–127 7-bit.
-- **Seek handling**: On `seek_occurred`, sends NoteOff at offset 0 for all pre-existing notes; sends NoteOn for any note active in the buffer even if it started before the buffer
-- **Instrument detection**: `has_note_input` flag on `EffectInstance`; `ClapEffectAdapter` queries `PluginNotePorts` extension at load time
-- **Instrument slot**: first effect in FX chain with `has_note_input == true`; skipped in standard FX loop
-- **Piano roll**: `ui/piano_roll.rs` — grid editor with note add (left-click), delete (right-click), playhead indicator, note-length selector toolbar, and configurable controller lane at the bottom
-- **Controller lanes** (`ControllerLane` enum): `None` (hide), `Velocity` (green bars, note-by-note), `ReleaseVelocity` (orange bars), `Cc(n)` (blue automation curves). Selected via toolbar buttons. Default note length and lane mode persisted in `PianoRollState`.
-- **Velocity lane**: Bars aligned to note X-positions, height proportional to velocity/127. Click-drag to edit. Batch undo on drag stop.
-- **Release velocity**: Stored on `MidiNote`, captured from `NoteOff` velocity on MIDI import. Edit same as velocity lane.
-- **CC automation curves**: Events drawn as connected line segments with 3px draggable circles. Click on segment to insert, drag to move, right-click to delete. The toolbar shows 5 common CC presets (1=ModWheel, 7=Volume, 10=Pan, 11=Expression, 64=Sustain) + custom text input.
-- **CC data model**: `CCEvent { cc_number: u8, time_frames: u64, value: f32 }` in `project/cc_event.rs`. Serialized via serde. Synced engine↔project in `sync_engine_to_project`.
-- **CC undo**: `AddCcEvent`, `RemoveCcEvent`, `MoveCcEvent` variants with batch-on-stop drag semantics.
-- **Sync**: `add_midi_note` / `remove_midi_note` / `add_midi_clip` / `add_midi_cc_event` / `remove_midi_cc_event` in `commands.rs` update both project and engine models, push undo commands
-- **Event sorting**: MIDI events sorted by sample offset using `EventBuffer::sort()` which uses `sort_unstable_by_key` (no heap alloc). **Critical**: Unstable sort means NoteOn and NoteOff at the same offset can reorder. During seeks, NoteOff cleanup and NoteOn restart both land at offset 0 — NoteOn is deliberately bumped to offset 1 to prevent reordering.
-- **CLAP activation pattern**: `instance.activate(|_, _| (), config)` creates a no-op `AudioProcessor` handler (no audio-thread host callbacks). This is the **correct and documented pattern** from clack_host examples. Audio ports are registered independently at `process()` call time via `AudioPorts.with_input_buffers()` / `.with_output_buffers()`.
-- **`ensure_processing_started()`**: Called before every `process()` call. **Safe to call every buffer** — the clack_host implementation (`PluginAudioProcessor::ensure_processing_started()` at `process.rs:299-306`) returns `Ok(&mut StartedPluginAudioProcessor)` if already started, only calls C `start_processing()` on transition from Stopped. If the plugin's C `start_processing()` returns false, this fails silently.
-- **MIDI diagnostics**: Tracing at `tracing::debug!` level in `process_track()` (instrument detection, event count per buffer, output verification) and `clap_effect.rs` (plugin load with `has_note_input`, ensure_processing_started failures, zero-output warnings).
-- **NoteOn construction**: `NoteOnEvent::new(offset, pckn, vel)` where `vel = note.velocity as f64 / 127.0` (normalized 0.0–1.0). `Pckn::new(port, channel, key, note_id)` — note_id always 0 (fine as long as overlapping same-key notes don't occur).
-- **Default note length**: Configurable in piano roll toolbar (1/1, 1/2, 1/4, 1/8, 1/16, 1/32), stored in `PianoRollState.note_length`. Used for single-click note creation (not click-drag).
-- **Sample rate aware**: `ClipHandle::new_midi()` takes `sample_rate` param; `draw_midi` takes `sample_rate` for correct beat-to-frame conversion
-
-### Undo Architecture (v0.5.0)
-- **UndoCommand enum** in `undo/mod.rs`: `MoveClip`, `TrimClip`, `DeleteClip`, `AddMidiNote`, `RemoveMidiNote`, `UpdateMidiNote`, `AddMidiClip`, `AddCcEvent`, `RemoveCcEvent`, `MoveCcEvent`, `AddTrack`, `DeleteTrack`, `AddEffect`, `RemoveEffect`, `RecordAudio`, `MoveAutomationPoint`
-- `apply_undo`/`apply_redo` take `&mut [TrackHandle]` (slice) — cannot add/remove elements
-- **Track undo/redo** handled at `HdawApp` level in `undo()`/`redo()` with full `Vec<TrackHandle>` access. `AddTrack`/`DeleteTrack` are no-op in `apply_undo`/`apply_redo`.
-- `DeleteTrack` undo restores track + track UI state + returns clips from pool
-- `AddTrack` undo removes the track from both models
-- `DeleteClip` undo creates `ClipHandle::new_midi()` for MIDI clips
-- `RemoveEffect.removed_lanes: Vec<AutomationLane>` — effect-param automation lanes preserved for undo/redo
-- `PoolClip::from_clip()` preserves original clip UUID for undo consistency
-
-### Effect Parameter Pattern
-- `DspEffect` trait: `process(&mut self)` (mutable DSP) + `Parameterizable` (immutable reads via `ParameterValue`)
-- `ParameterValue` wraps `AtomicU32` for lock-free audio thread reads
-- Parameter changes: UI calls `effect.set_parameter()` → atomic store → effect reads on next `process()` call
-- Dirty flag pattern on EQ: marks coeffs need rebuild, rebuilds on next `process()` call
-
-### Thread-Local Scratch Buffers
-```
-stream.rs:    SCRATCH_L, SCRATCH_R    — output accumulation
-process.rs:   MIX_L, MIX_R            — per-track clip mixing
-clap_effect.rs: COMBINED_EVENTS       — merged pending + input CLAP events
-```
-These are `thread_local! RefCell<Vec<f32>>` (or `EventBuffer`) that grow on first use but stabilize capacity after a few callbacks.
+- `Transport.playing: AtomicBool` — play/pause/stop
+- `loop_region: AtomicU64` — packed as (loop_out << 32) | loop_in
+- `seek_occurred: AtomicBool` — set by `seek_to_frame()` and `stop()`, cleared once per audio callback. Triggers NoteOff for all active notes + CLAP reset.
 
 ### Preferences System
 - `PreferencesState` in `ui/preferences.rs` — audio config, project defaults, UI layout values
-- Persisted via RON to `%APPDATA%/hdaw/preferences.ron` (or `$HOME/hdaw/` on non-Windows)
-- Loaded at startup, saved on Apply or file dialog directory changes
-- **Timeline layout** (`header_width`, `track_height`) stored in `TimelineState`, initialized from preferences
-- Applied via `apply_preferences()` — rebuilds audio stream + updates timeline layout values
-- File dialog directories (`last_import_dir`, `last_open_dir`, `last_save_dir`) persisted alongside
+- Persisted via RON to `%APPDATA%/hdaw/preferences.ron`
+- Saved on: Apply in dialog, file dialog directory changes, and `close_requested()`
+- Panel sizes (`right_panel_width`, `mixer_panel_height`) stored in prefs
 
-### Timeline Layout (Dynamic, Not Constants)
-- `header_width` and `track_height` are **NOT** compile-time constants — they live in `TimelineState`
-- All timeline submodules receive these as `f32` parameters from the parent `render()` call
-- `DEFAULT_HEADER_WIDTH` (220.0) and `DEFAULT_TRACK_HEIGHT` (80.0) are fallback defaults only
-- Changing these in preferences → Apply immediately updates all timeline rendering
+### Loop Region Persistence
+- Loop in/out frames + enabled flag stored on `Project` struct with `#[serde(default)]`
+- `sync_engine_to_project()` copies from `Transport.load_loop_region()` + `loop_enabled` to project model
+- `load_project_file()` calls `Transport.set_loop_region()` + `loop_enabled.store()` after project load
+- **Always use `#[serde(default)]`** when adding new fields to `Project` — old .ron files won't have them
 
-### Sample Rate Conversion
-- `resample()` in `project_io.rs` — linear interpolation resampler
-- `load_audio_file()` detects WAV file rate mismatch with engine rate and resamples automatically
-- Keeps all clips at the engine's native sample rate for consistent playback
+### Panel Layout (Tiled)
+- `SidePanel::right` → Right panel (Browser/Clip Info/FX Detail)
+- `CentralPanel` → Main tile, dispatches on `MainView::Arrange | PianoRoll`
+- `TopBottomPanel::bottom` → Bottom panel (Mixer/Sends/FX Chain)
+- `TopBottomPanel::bottom` → Status bar (absolute bottom)
+- Panel sizes restored from `PreferencesState` via `default_width()` / `default_height()`
+- Sizes saved every frame from `PanelResponse.response.rect.{width,height}()`
 
 ## File Map (Current)
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `app/mod.rs` | 334 | HdawApp struct, constructor, accessors, `eframe::App::update`, undo/redo with track handling |
-| `app/commands.rs` | 399 | Clip/track manipulation ops, pool clip restore, MIDI note/clip/add/remove, CC event add/remove/move, track delete with undo |
-| `app/project_io.rs` | 308 | Save/load/new/import, resample, sync_engine_to_project (incl. MIDI note + CC event sync) |
-| `app/input.rs` | 158 | Keyboard handling, pending requests, file dialogs |
-| `app/prefs_io.rs` | 34 | Preferences load/save via RON |
-| `app/undo/mod.rs` | 135 | UndoCommand enum (incl. AddTrack/DeleteTrack/AddMidiNote/RemoveMidiNote/AddMidiClip/AddCcEvent/RemoveCcEvent/MoveCcEvent), UndoStack |
-| `app/undo/commands.rs` | 343 | apply_undo/apply_redo implementations for all clip/MIDI/CC variants |
-| `ui/timeline/mod.rs` | 305 | Timeline render, zoom/scroll, grid, track layout, context menu |
-| `ui/timeline/clips.rs` | 282 | Clip waveform/MIDI drawing + drag/trim/double-click interaction |
-| `ui/timeline/automation.rs` | 173 | Automation curve drawing + point editing helpers |
-| `ui/timeline/interaction.rs` | 206 | Seek, loop, clip, track header interaction handlers |
-| `ui/timeline/auto_interaction.rs` | 146 | Automation point interaction + dirty-flag sync to project |
-| `ui/timeline/ruler.rs` | 121 | Time ruler ticks, labels, loop markers |
-| `ui/timeline/track_headers.rs` | 139 | Track header drawing, mute/solo buttons, hit testing, instrument/FX info display |
-| `ui/timeline/playhead.rs` | 14 | Playhead line drawing |
-| `ui/piano_roll.rs` | 220 | Piano roll grid editor with note add/delete/playhead, note-length toolbar, velocity/release-velocity bars, CC curve editor |
-| `ui/effect_editor/mod.rs` | 337 | FX chain panel + effect parameter UI + engine_fx_to_serialized sync |
-| `ui/effect_editor/eq_graph.rs` | 82 | EQ frequency response graph |
-| `ui/preferences.rs` | 206 | Preferences dialog (3 sections: Audio, Project, Timeline/UI) |
-| `ui/toolbar.rs` | 169 | Top toolbar with transport controls, menus, "+" dropdown |
-| `ui/app_ui.rs` | 175 | Main layout: toolbar, panels, timeline, status bar, instrument dialog |
-| `ui/mixer_panel.rs` | 94 | Mixer strip panel (VU meter + slider side-by-side) |
-| `ui/audio_pool.rs` | 83 | Audio pool panel for imported files |
-| `audio/engine.rs` | 134 | AudioEngine struct, init, play/pause/stop, rebuild, seek_occurred pass-through |
-| `audio/stream.rs` | 150 | build_stream, mix_tracks with seek_occurred, name_audio_thread, scratch buffers |
-| `audio/process.rs` | 119 | Per-track audio processing with seek-aware MIDI dispatch |
-| `audio/midi_dispatch.rs` | 155 | MIDI note + CC event dispatch to CLAP instruments |
-| `audio/transport.rs` | 80 | Transport: play/pause/stop, packed loop region, position, seek_occurred |
-| `audio/clap_scanner.rs` | 100 | CLAP plugin discovery in OS-standard directories |
-| `audio/clap_host.rs` | 47 | HDAW CLAP host handlers (logging, lifecycle) |
-| `audio/clap_instance.rs` | 75 | ClapPluginState: plugin metadata, parameter bridge |
-| `audio/clap_effect.rs` | 180 | ClapEffectAdapter: Drop impl, try_lock, COMBINED_EVENTS, process_inner, note-port detection, open_gui/close_gui/show_gui |
-| `audio/mixer.rs` | 43 | Master bus volume + peak metering |
-| `audio/effects/` | ~540 | 5 effects (Gain, EQ, Delay, Reverb, Compressor) + traits + factory |
-| `dsp/biquad.rs` | 89 | Shared biquad filter math |
-| `project/track.rs` | 97 | `TrackHandle` (engine) + `Track` (project) with `clips: Vec<ClipKind>` |
-| `project/automation.rs` | 64 | `AutomationLane` (with dirty flag) + `AutomationPoint` |
-| `project/cc_event.rs` | 12 | `CCEvent` struct (cc_number, time_frames, value) |
-| `project/clip.rs` | 88 | `ClipKind` enum + `AudioClip` with waveform peaks |
-| `project/clip_handle.rs` | 69 | `ClipHandle` (engine-side) with `midi_notes` + `midi_cc_events`, sample-rate-aware `new_midi()` |
-| `project/midi_clip.rs` | 13 | `MidiClip` struct (position, length, notes, cc_events, color) |
-| `project/midi_note.rs` | 9 | `MidiNote` struct (pitch, velocity, release_velocity, start_frame, duration) |
-| `project/marker.rs` | 19 | `Marker` definition |
-| `project/pool.rs` | 28 | `AudioPoolEntry` definition (supports ClipKind, preserves UUID) |
-| | | |
-| | _New files added in v0.5.0_ | |
-| `project/cc_event.rs` | 12 | `CCEvent` struct for MIDI controller automation |
-| `ui/piano_roll_state.rs` | 34 | PianoRollState with controller lane config, CcDragState |
-| | | |
-| | _New files added in v0.6.0_ | |
-| `tests/midi_pipeline_test.rs` | 202 | Integration tests for MIDI→CLAP→audio pipeline |
-| | | |
-| | _New files added in v0.7.0_ | |
-| `src/audio/effects/chorus.rs` | ~100 | Chorus effect (modulated delay + LFO) |
-| `src/audio/effects/flanger.rs` | ~100 | Flanger effect (short delay + feedback) |
-| `src/audio/effects/phaser.rs` | ~100 | Phaser effect (6-stage allpass chain) |
-| `src/audio/effects/distortion.rs` | ~70 | Distortion effect (tanh waveshaper) |
+| `app/mod.rs` | ~334 | HdawApp struct, MainView/RPanelMode/BPanelMode enums, undo/redo |
+| `app/commands.rs` | ~399 | Clip/track ops, MIDI note/CC ops, pool restore |
+| `app/project_io.rs` | ~167 | Save/load/new/import, sync_engine_to_project, loop sync |
+| `app/input.rs` | ~158 | Keyboard handling, pending requests, file dialogs |
+| `app/prefs_io.rs` | ~34 | Preferences load/save via RON |
+| `app/undo/mod.rs` | ~135 | UndoCommand enum, UndoStack |
+| `app/undo/commands.rs` | ~343 | apply_undo/apply_redo implementations |
+| `ui/timeline/mod.rs` | ~305 | Timeline render, zoom/scroll, grid, track layout |
+| `ui/timeline/clips.rs` | ~599 | Clip drawing + drag/trim/double-click |
+| `ui/timeline/automation.rs` | ~173 | Automation curve drawing + editing |
+| `ui/timeline/interaction.rs` | ~206 | Seek, loop, clip, header interaction |
+| `ui/timeline/auto_interaction.rs` | ~146 | Automation point interaction + dirty-flag sync |
+| `ui/timeline/ruler.rs` | ~121 | Time ruler ticks, labels, loop markers |
+| `ui/timeline/track_headers.rs` | ~139 | Track header, mute/solo, expand button |
+| `ui/timeline/playhead.rs` | ~14 | Playhead line drawing |
+| `ui/piano_roll.rs` | ~816 | Piano roll grid editor, controller lanes, render_panel() |
+| `ui/piano_roll_state.rs` | ~34 | Controller lane config, drag state |
+| `ui/right_panel.rs` | ~118 | Tabbed side panel (Browser/Clip Info/FX) |
+| `ui/bottom_panel.rs` | ~343 | Tabbed bottom panel (Mixer/Sends/FX Chain), VU meter |
+| `ui/app_ui.rs` | ~391 | Main layout: toolbar → right panel → central → bottom → status bar |
+| `ui/toolbar.rs` | ~319 | Transport controls, menus, Arrange toggle, panel toggles |
+| `ui/preferences.rs` | ~424 | Preferences dialog + PreferencesState |
+| `ui/panels.rs` | ~67 | Remaining floating panels (AudioPool, EffectEditor, Preferences) |
+| `ui/audio_pool.rs` | ~83 | Audio pool panel |
+| `ui/effect_editor/mod.rs` | ~337 | FX chain panel + parameter UI + engine_fx_to_serialized |
+| `ui/effect_editor/eq_graph.rs` | ~82 | EQ frequency response graph |
+| `audio/engine.rs` | ~134 | AudioEngine, play/pause/stop, rebuild, loop wrap |
+| `audio/stream.rs` | ~150 | build_stream, mix_tracks, scratch buffers |
+| `audio/process.rs` | ~119 | Per-track processing with MIDI dispatch |
+| `audio/midi_dispatch.rs` | ~155 | MIDI note + CC to CLAP instrument |
+| `audio/transport.rs` | ~80 | Transport, loop_region packing, seek_occurred |
+| `audio/clap_scanner.rs` | ~100 | CLAP plugin discovery |
+| `audio/clap_host.rs` | ~47 | CLAP host handlers |
+| `audio/clap_instance.rs` | ~75 | Plugin state, parameter bridge |
+| `audio/clap_effect.rs` | ~180 | ClapEffectAdapter, param ring, note-port detection |
+| `audio/mixer.rs` | ~43 | Master bus volume + peak metering |
+| `audio/effects/` | ~540 | Gain, EQ, Delay, Reverb, Compressor, Chorus, Flanger, Phaser, Distortion |
+| `dsp/biquad.rs` | ~89 | Shared biquad filter math |
+| `project/` | ~300 | Project/Track/Clip/ClipHandle/MidiNote/MidiClip/CCEvent/Automation/Marker/Pool |
+| `tests/midi_pipeline_test.rs` | ~202 | MIDI→CLAP→audio integration tests |
 
 ## Common Patterns to Follow
 
 ### Adding a New Feature
 1. Check if it modifies clip/track/effect state → must update BOTH models
 2. Check if it touches the audio callback → use atomics, thread_local buffers, `try_lock()`
-3. Check if it needs serialization → add `Serialize`/`Deserialize` to relevant structs, update `load_project_file`
-4. Check if it adds UI layout values → store in `PreferencesState` + `TimelineState`, thread as parameters
-5. Check if it needs undo → add variant to `UndoCommand`, implement in `apply_undo`/`apply_redo`; for track-level ops handle at `HdawApp` level
+3. Check if it needs serialization → add `Serialize`/`Deserialize` to `Project` or `PreferencesState`, use `#[serde(default)]` for backward compat
+4. Check if it adds UI layout values → store in `PreferencesState`, thread as parameters
+5. Check if it needs undo → add variant to `UndoCommand`, implement `apply_undo`/`apply_redo`
 
-### Adding Undo for a New Operation
-1. Add variant to `UndoCommand` enum in `undo/mod.rs`
-2. Implement restore logic in `apply_undo()` and `apply_redo()` in `undo/commands.rs`
-3. If the operation affects track count, handle at `HdawApp::undo()`/`redo()` level instead (slice-based `apply_undo` can't add/remove elements)
-4. Push the command via `self.undo_state.push(UndoCommand::...)` at the call site
-5. Preserve UUIDs when creating pool clips or restoring from undo (use `PoolClip::from_clip` which preserves original IDs)
+### Adding a New Tiled Panel
+1. Choose the right egui panel type: `SidePanel::right`, `TopBottomPanel::bottom`, or `CentralPanel` dispatch
+2. Add a mode enum (e.g. `RightPanelMode`) if it has tabs
+3. Register the panel's render call in `app_ui.rs` in the correct order
+4. Store its default size in `PreferencesState` with a field name
+5. Save actual size from `PanelResponse.response.rect.{width,height}()` every frame
+6. If replacing a floating Window, provide both `render()` (Window-wrapped) and `render_panel()` (inline) signatures for backward compat
 
-### File Sizing Rules
-- **Keep files under 350 lines.** If exceeding, split into focused sub-modules.
-- **Extract helper functions** when a function exceeds 40 lines.
-- **Extract interaction logic** from rendering code.
-- UI code should NOT contain DSP math — put that in `dsp/`.
+### Preserving State Between Sessions
+- **Panel sizes**: Store in `PreferencesState`, read via `default_width()`/`default_height()`, save every frame from `PanelResponse`, persist on `close_requested()`
+- **Loop regions**: Store on `Project` with `#[serde(default)]`, sync in `sync_engine_to_project()` and `load_project_file()`
+- **File dialog dirs**: `last_import_dir`, `last_open_dir`, `last_save_dir` on `PreferencesState` (Option<PathBuf>)
+- **Recent files**: `recent_files: Vec<PathBuf>` on `PreferencesState`, dedup'd, capped at 10
 
-### Adding Effects
-1. Add variant to `EffectType` enum in `dsp_effect.rs`
-2. Create effect struct implementing `DspEffect` + `Parameterizable`
-3. Add factory entry in `effects/mod.rs` `create_effect()`
-4. Reuse `dsp/biquad.rs` for filter-based effects
-5. If adding CLAP effect via UI, sync to project model using `engine_fx_to_serialized()` pattern
+### Floating Panel → Tiled Panel Migration
+```rust
+// Old: floating window
+pub fn render(ctx: &Context, app: &mut HdawApp) {
+    if !app.some_flag { return; }
+    egui::Window::new("Title").show(ctx, |ui| {
+        content(ui, app);
+    });
+}
 
-### Timeline Layout Parameters
-When adding new timeline rendering or interaction code:
-- Accept `header_width: f32` and `track_height: f32` as parameters (do NOT import constants)
-- Get them from `app.timeline_state.header_width` / `app.timeline_state.track_height`
-- See `timeline/mod.rs::render()` for the canonical pattern of threading these through
-
-### Mutex Poison Recovery
-- Use `lock_clap()`/`lock_clap_mut()` helpers in `dsp_effect.rs` for CLAP effect access
-- These use `.lock().unwrap_or_else(|e| e.into_inner())` to recover from poisoned mutexes
-- Never `unwrap()` a `Mutex::lock()` result in production code
+// New: both signatures — Window wrapper for backward compat + panel for tiled layout
+pub fn render(ctx: &Context, app: &mut HdawApp) {
+    if app.some_flag {
+        egui::Window::new("Title").show(ctx, |ui| {
+            render_panel(ui, app);
+        });
+    }
+}
+pub fn render_panel(ui: &mut egui::Ui, app: &mut HdawApp) {
+    content(ui, app);
+}
+```
 
 ## What NOT To Do
 - Don't allocate `Vec` in audio callback — use `thread_local!` scratch buffers
@@ -364,11 +184,12 @@ When adding new timeline rendering or interaction code:
 - Don't add dependencies not already in `Cargo.toml` without approval
 - Don't use `FileDialog::directory()` — use `initial_directory(path.clone())` (takes `PathBuf`, not `&PathBuf`)
 - Don't create compile-time constants for layout values that should be runtime-configurable
-- Don't remove the `ui.horizontal()` wrapper in `mixer_panel::render` — mixer channels (master + tracks) must be laid out side-by-side, not stacked vertically
 - Don't use `drop(())` for unused values — use `let _ = ()` instead
-- Don't generate new UUIDs in `PoolClip::from_clip()` — preserve the original clip's UUID for undo consistency
+- Don't generate new UUIDs in `PoolClip::from_clip()` — preserve original UUID for undo consistency
 - Don't deep-compare automation points every frame — use the dirty flag pattern
 - Don't use `.lock().unwrap()` on CLAP effect mutexes — use poison-safe `lock_clap()`/`lock_clap_mut()` helpers
+- Don't add `#[serde(default)]` fields without testing backward compat — load an old .ron file and verify fields are `Default::default()`
+- Don't create new floating window editors — prefer `render_panel(ui, app)` for inline tiling and keep `render(ctx, app)` as a thin `Window` shim
 
 ## Key Dependencies
 - egui/eframe 0.30 — UI

@@ -27,12 +27,13 @@ pub struct PianoRollState {
     pub controller_drag_note: Option<usize>,
     pub cc_number: u8,
     pub cc_drag: Option<CcDragState>,
+    pub initial_window_size: Option<(f32, f32)>,
 }
 
 #[derive(Clone, PartialEq)]
 pub enum PianoRollDragTarget {
-    NoteMove { note_idx: usize, original_note: crate::project::midi_note::MidiNote },
-    NoteResize { note_idx: usize, original_duration: u64 },
+    NoteMove { note_idx: usize, original_note: crate::project::midi_note::MidiNote, drag_start_x: f32, drag_start_y: f32 },
+    NoteResize { note_idx: usize, original_duration: u64, drag_start_x: f32 },
     NoteCreate { pitch: u8, start_frame: u64, current_end_frame: u64 },
 }
 
@@ -50,6 +51,7 @@ impl Default for PianoRollState {
             controller_drag_note: None,
             cc_number: 1,
             cc_drag: None,
+            initial_window_size: None,
         }
     }
 }

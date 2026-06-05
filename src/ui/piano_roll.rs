@@ -1,4 +1,4 @@
-use crate::app::HdawApp;
+use crate::app::{HdawApp, MainView};
 use crate::project::clip::ClipKind;
 use crate::project::midi_note::MidiNote;
 use crate::ui::piano_roll_state::{ControllerLane, PianoRollDragTarget};
@@ -24,16 +24,71 @@ fn is_white_key(n: u8) -> bool {
 }
 
 pub fn render(ctx: &egui::Context, app: &mut HdawApp) {
-    if !app.show_piano_roll {
+    if app.main_view != MainView::PianoRoll {
         return;
     }
 
     let clip_id = match app.editing_midi_clip_id {
         Some(id) => id,
         None => {
-            app.show_piano_roll = false;
+            app.main_view = MainView::Arrange;
             return;
         }
+    };
+
+    let clip_data = app.project.tracks.iter().enumerate().find_map(|(ti, t)| {
+        t.clips.iter().find_map(|c| match c {
+            ClipKind::Midi(m) if m.id == clip_id => Some((ti, m.clone())),
+            _ => None,
+        })
+    });
+
+    let (_track_idx, clip) = match clip_data {
+        Some(d) => d,
+        None => {
+            app.main_view = MainView::Arrange;
+            return;
+        }
+    };
+
+    let mut show = true;
+    let ds = app.piano_roll_state.initial_window_size.get_or_insert_with(|| {
+        let avail = ctx.available_rect();
+        ((avail.width() * 0.8).max(400.0), (avail.height() * 0.7).max(300.0))
+    });
+    egui::Window::new(format!("Piano Roll - {}", clip.name))
+        .id("piano_roll".into())
+        .open(&mut show)
+        .collapsible(false)
+        .resizable(true)
+        .default_size(Vec2::new(ds.0, ds.1))
+        .min_size(Vec2::new(400.0, 300.0))
+        .show(ctx, |ui| {
+            render_panel(ui, app);
+        });
+
+    if !show {
+        app.main_view = MainView::Arrange;
+        app.editing_midi_clip_id = None;
+    }
+}
+
+pub fn render_panel(ui: &mut egui::Ui, app: &mut HdawApp) {
+    let clip_id = match app.editing_midi_clip_id {
+        Some(id) => id,
+        None => return,
+    };
+
+    let clip_data = app.project.tracks.iter().enumerate().find_map(|(ti, t)| {
+        t.clips.iter().find_map(|c| match c {
+            ClipKind::Midi(m) if m.id == clip_id => Some((ti, m.clone())),
+            _ => None,
+        })
+    });
+
+    let (_track_idx, clip) = match clip_data {
+        Some(d) => d,
+        None => return,
     };
 
     let sr = app.engine.transport.sample_rate();
@@ -43,37 +98,14 @@ pub fn render(ctx: &egui::Context, app: &mut HdawApp) {
     let pps = app.piano_roll_state.zoom_x;
     let row_height = app.piano_roll_state.zoom_y as f32;
 
-    let clip_data = app.project.tracks.iter().enumerate().find_map(|(ti, t)| {
-        t.clips.iter().find_map(|c| match c {
-            ClipKind::Midi(m) if m.id == clip_id => Some((ti, m.clone())),
-            _ => None,
-        })
-    });
-
-    let (track_idx, clip) = match clip_data {
-        Some(d) => d,
-        None => {
-            app.show_piano_roll = false;
-            return;
-        }
-    };
-
     let min_note = app.preferences.piano_roll_min_note;
     let max_note = app.preferences.piano_roll_max_note;
     let note_bar_height = row_height * NOTE_BAR_HEIGHT_RATIO;
     let num_rows = (max_note.saturating_sub(min_note) as usize).max(1) + 1;
 
-    let mut show = app.show_piano_roll;
-    let avail = ctx.available_rect();
-    let init_w = (avail.width() * 0.8).max(400.0);
-    let init_h = (avail.height() * 0.7).max(300.0);
-    egui::Window::new(format!("Piano Roll - {}", clip.name))
-        .id("piano_roll".into())
-        .open(&mut show)
-        .collapsible(false)
-        .resizable(true)
-        .default_size(Vec2::new(init_w, init_h))
-        .show(ctx, |ui| {
+    let track_idx = _track_idx;
+
+    {
             // Handle scroll and zoom — only when pointer is over this window
             let is_over = ui.input(|i| i.pointer.hover_pos())
                 .is_some_and(|p| ui.clip_rect().contains(p));
@@ -379,9 +411,9 @@ pub fn render(ctx: &egui::Context, app: &mut HdawApp) {
                             let note_w = (dur_secs * pps) as f32;
 
                             if pos.x > note_x + note_w - 8.0 {
-                                app.piano_roll_state.drag_target = Some(PianoRollDragTarget::NoteResize { note_idx: idx, original_duration: n.duration });
+                                app.piano_roll_state.drag_target = Some(PianoRollDragTarget::NoteResize { note_idx: idx, original_duration: n.duration, drag_start_x: pos.x });
                             } else {
-                                app.piano_roll_state.drag_target = Some(PianoRollDragTarget::NoteMove { note_idx: idx, original_note: n.clone() });
+                                app.piano_roll_state.drag_target = Some(PianoRollDragTarget::NoteMove { note_idx: idx, original_note: n.clone(), drag_start_x: pos.x, drag_start_y: pos.y });
                             }
                         } else {
                             // Click-drag on empty space: start creating a new note
@@ -397,10 +429,6 @@ pub fn render(ctx: &egui::Context, app: &mut HdawApp) {
             }
 
             if response.dragged() {
-                let delta_x = response.drag_delta().x as f64;
-                let delta_y = response.drag_delta().y as f64;
-                let frames_delta = (delta_x / pps * sr as f64).round() as i64;
-
                 // For NoteCreate, recompute end_frame from current pointer position
                 if matches!(app.piano_roll_state.drag_target, Some(PianoRollDragTarget::NoteCreate { .. })) {
                     if let Some(pos) = response.interact_pointer_pos() {
@@ -415,24 +443,31 @@ pub fn render(ctx: &egui::Context, app: &mut HdawApp) {
                         }
                     }
                 } else if let Some(target) = app.piano_roll_state.drag_target.clone() {
+                    let cursor_pos = response.interact_pointer_pos();
                     match target {
-                        PianoRollDragTarget::NoteMove { note_idx, original_note } => {
-                            let pitch_delta = -(delta_y / row_height as f64).round() as i32;
-                            let new_pitch = (original_note.pitch as i32 + pitch_delta).clamp(0, 127) as u8;
-                            let new_start = (original_note.start_frame as i64 + frames_delta).max(0) as u64;
+                        PianoRollDragTarget::NoteMove { note_idx, original_note, drag_start_x, drag_start_y } => {
+                            if let Some(p) = cursor_pos {
+                                let pitch_delta = -((p.y - drag_start_y) / row_height).round() as i32;
+                                let frames_delta = ((p.x - drag_start_x) as f64 / pps * sr as f64).round() as i64;
+                                let new_pitch = (original_note.pitch as i32 + pitch_delta).clamp(0, 127) as u8;
+                                let new_start = (original_note.start_frame as i64 + frames_delta).max(0) as u64;
 
-                            let mut new_note = original_note.clone();
-                            new_note.pitch = new_pitch;
-                            new_note.start_frame = app.timeline_state.snap_frames_to_grid(new_start, sr, bpm, &app.preferences, &app.project.markers);
+                                let mut new_note = original_note.clone();
+                                new_note.pitch = new_pitch;
+                                new_note.start_frame = app.timeline_state.snap_frames_to_grid(new_start, sr, bpm, &app.preferences, &app.project.markers);
 
-                            app.update_midi_note(track_idx, clip_id, note_idx, new_note);
+                                app.update_midi_note(track_idx, clip_id, note_idx, new_note);
+                            }
                         }
-                        PianoRollDragTarget::NoteResize { note_idx, original_duration } => {
-                            let new_dur = (original_duration as i64 + frames_delta).max(sr as i64 / 100) as u64;
-                            let dur = app.timeline_state.snap_frames_to_grid(new_dur, sr, bpm, &app.preferences, &app.project.markers).max(1);
-                            let mut n = clip.notes[note_idx].clone();
-                            n.duration = dur;
-                            app.update_midi_note(track_idx, clip_id, note_idx, n);
+                        PianoRollDragTarget::NoteResize { note_idx, original_duration, drag_start_x } => {
+                            if let Some(p) = cursor_pos {
+                                let frames_delta = ((p.x - drag_start_x) as f64 / pps * sr as f64).round() as i64;
+                                let new_dur = (original_duration as i64 + frames_delta).max(sr as i64 / 100) as u64;
+                                let dur = app.timeline_state.snap_frames_to_grid(new_dur, sr, bpm, &app.preferences, &app.project.markers).max(1);
+                                let mut n = clip.notes[note_idx].clone();
+                                n.duration = dur;
+                                app.update_midi_note(track_idx, clip_id, note_idx, n);
+                            }
                         }
                         _ => {}
                     }
@@ -776,14 +811,5 @@ pub fn render(ctx: &egui::Context, app: &mut HdawApp) {
                     ControllerLane::None => {}
                 }
             }
-        });
-
-    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-        show = false;
+        }
     }
-
-    if !show {
-        app.show_piano_roll = false;
-        app.editing_midi_clip_id = None;
-    }
-}

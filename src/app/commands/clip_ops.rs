@@ -209,7 +209,7 @@ impl HdawApp {
                 handle.add_clip(ch);
             }
         }
-        self.undo_service.push(UndoCommand::DuplicateClip { track_index, clip_id, new_clip_id: new_id });
+        self.undo_service.push(UndoCommand::DuplicateClip { track_index, clip_id, new_clip_id: new_id, new_clip: clip.clone() });
     }
 
     pub fn split_clip_at(&mut self, track_index: usize, clip_id: uuid::Uuid, split_frame: u64) {
@@ -248,14 +248,14 @@ impl HdawApp {
             }
         }
         let audio_for_engine = audio_buf.clone();
-        let right_clip = match (audio_buf, midi_notes) {
+        let (right_midi_notes, right_clip) = match (audio_buf, midi_notes) {
             (Some(buf), _) => {
                 let mut a = crate::project::clip::AudioClip::new("split".into(), buf);
                 a.id = right_id;
                 a.position_frames = split_frame;
                 a.offset_frames = split_local;
                 a.length_frames = right_len;
-                ClipKind::Audio(a)
+                (None, ClipKind::Audio(a))
             }
             (_, Some(orig_notes)) => {
                 let local_split = split_frame - pos;
@@ -272,15 +272,16 @@ impl HdawApp {
                     name: "split".into(),
                     position_frames: split_frame,
                     length_frames: right_len,
-                    notes: right_notes,
+                    notes: right_notes.clone(),
                     color: [0x8a, 0x2b, 0xe2],
                     cc_events: Vec::new(),
                     thumb_dirty: true,
                 };
-                ClipKind::Midi(m)
+                (Some(right_notes), ClipKind::Midi(m))
             }
             _ => return,
         };
+        let split_clip = right_clip.clone();
         if let Some(track) = self.project.tracks.get_mut(track_index) {
             track.add_clip(right_clip);
         }
@@ -296,7 +297,8 @@ impl HdawApp {
                         ch
                     }
                     None => {
-                        let ch = crate::project::clip_handle::ClipHandle::new_midi(right_id, vec![], right_len, sr);
+                        let notes = right_midi_notes.unwrap_or_default();
+                        let ch = crate::project::clip_handle::ClipHandle::new_midi(right_id, notes, right_len, sr);
                         ch.set_position(split_frame);
                         ch
                     }
@@ -311,6 +313,7 @@ impl HdawApp {
             old_length: len,
             left_length: left_len,
             right_length: right_len,
+            right_clip: split_clip,
         });
     }
 

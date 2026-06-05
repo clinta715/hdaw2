@@ -1,4 +1,4 @@
-use crate::app::{HdawApp, UnsavedChangesAction};
+use crate::app::{HdawApp, MainView, UnsavedChangesAction};
 use crate::app::input;
 use egui::{pos2, Color32, Context, Rect, Vec2};
 
@@ -44,6 +44,7 @@ pub fn render(app: &mut HdawApp, ctx: &Context) {
         app.selected_track.is_some(),
         app.audio_pool_state.visible,
         has_instruments,
+        app.main_view != MainView::Arrange,
         &app.preferences.recent_files,
     );
 
@@ -133,11 +134,9 @@ pub fn render(app: &mut HdawApp, ctx: &Context) {
     if action.metronome_clicked {
         app.engine.transport.toggle_metronome();
     }
-
     if action.record_clicked {
         app.record_requested = true;
     }
-
     if action.preferences_clicked {
         app.preferences.show_dialog = true;
     }
@@ -147,15 +146,31 @@ pub fn render(app: &mut HdawApp, ctx: &Context) {
     if action.shortcuts_clicked {
         app.show_shortcuts = true;
     }
+    if action.arrange_clicked {
+        app.main_view = MainView::Arrange;
+        app.editing_midi_clip_id = None;
+    }
     if action.export_clicked {
         app.export_requested = true;
     }
 
-    app.mixer_state.master_volume = app.master_volume();
-    let mv = app.mixer_state.master_volume;
-    app.set_master_volume(mv);
+    // === Panel Layout ===
 
-    // 1. Status Bar (Absolute Bottom)
+    // 1. Right Panel (Browser / Clip Info / FX Detail)
+    crate::ui::right_panel::render(ctx, app);
+
+    // 2. Central Panel — main tile (Arrange or Piano Roll)
+    egui::CentralPanel::default().show(ctx, |ui| {
+        match app.main_view {
+            MainView::Arrange => crate::ui::timeline::render(ui, app),
+            MainView::PianoRoll => crate::ui::piano_roll::render_panel(ui, app),
+        }
+    });
+
+    // 3. Bottom Panel (Mixer / Sends / FX Chain)
+    crate::ui::bottom_panel::render(ctx, app);
+
+    // 4. Status Bar (Absolute Bottom)
     let err_msg = app.error_message.clone();
     use std::sync::atomic::Ordering;
     let master_peak_l = app.engine.master_bus.peak_left.load(Ordering::Acquire);
@@ -200,10 +215,10 @@ pub fn render(app: &mut HdawApp, ctx: &Context) {
         });
     });
 
-    // 2. Registered panels (mixer, audio pool, effects, piano roll, preferences)
+    // 5. Registered floating panels (audio pool, effects, preferences)
     crate::ui::panels::render_all(app, ctx);
 
-    // 3. Export Dialog
+    // 6. Export Dialog
     if app.export_save_path.is_some() || app.exporting || app.export_done_message.is_some() {
         egui::Window::new("Export Audio")
             .collapsible(false)
@@ -243,14 +258,15 @@ pub fn render(app: &mut HdawApp, ctx: &Context) {
             });
     }
 
-    // 4. Intercept window close if unsaved changes
-    if ctx.input(|i| i.viewport().close_requested()) && app.confirm_unsaved.is_none()
-        && app.has_unsaved_changes()
-    {
-        app.confirm_unsaved = Some(UnsavedChangesAction::CloseApp);
+    // 7. Intercept window close if unsaved changes
+    if ctx.input(|i| i.viewport().close_requested()) {
+        crate::app::prefs_io::save_preferences(&app.preferences);
+        if app.confirm_unsaved.is_none() && app.has_unsaved_changes() {
+            app.confirm_unsaved = Some(UnsavedChangesAction::CloseApp);
+        }
     }
 
-    // 5. Unsaved changes confirmation dialog
+    // 8. Unsaved changes confirmation dialog
     if app.confirm_unsaved.is_some() {
         let mut keep_open = true;
         egui::Window::new("Unsaved Changes")
@@ -290,7 +306,7 @@ pub fn render(app: &mut HdawApp, ctx: &Context) {
             });
     }
 
-    // 6. Keyboard Shortcuts dialog
+    // 9. Keyboard Shortcuts dialog
     if app.show_shortcuts {
         egui::Window::new("Keyboard Shortcuts")
             .collapsible(false)
@@ -336,7 +352,7 @@ pub fn render(app: &mut HdawApp, ctx: &Context) {
             });
     }
 
-    // 7. About dialog
+    // 10. About dialog
     if app.show_about {
         egui::Window::new("About HDAW")
             .collapsible(false)
@@ -353,7 +369,7 @@ pub fn render(app: &mut HdawApp, ctx: &Context) {
             });
     }
 
-    // 7. Instrument dialog
+    // 11. Instrument dialog
     if app.show_instrument_dialog {
         let instruments: Vec<_> = app.plugin_registry.iter()
             .filter(|d| d.is_instrument)
@@ -387,9 +403,4 @@ pub fn render(app: &mut HdawApp, ctx: &Context) {
             app.show_instrument_dialog = false;
         }
     }
-
-    // 8. Central Panel (Timeline)
-    egui::CentralPanel::default().show(ctx, |ui| {
-        crate::ui::timeline::render(ui, app);
-    });
 }

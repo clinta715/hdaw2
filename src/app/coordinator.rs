@@ -74,7 +74,7 @@ impl AppCoordinator {
                         *selected_track = None;
                         effect_editor_state.selected_track = None;
                     }
-                    UndoCommand::RecordAudio { track_indices, clip_ids } => {
+                    UndoCommand::RecordAudio { track_indices, clip_ids, .. } => {
                         for (ti, cid) in track_indices.iter().zip(clip_ids.iter()) {
                             if let Some(track) = tracks.get_mut(*ti) {
                                 track.clips.retain(|c| c.clip_id != *cid);
@@ -87,6 +87,10 @@ impl AppCoordinator {
                     }
                     UndoCommand::DeleteTrack { track_index, track, track_ui: track_ui_snap, .. } => {
                         let mut handle = crate::project::track::TrackHandle::new();
+                        handle.id = track.id;
+                        handle.parent_group = track.parent_group;
+                        handle.is_group = track.is_group;
+                        handle.is_return = track.is_return;
                         handle.volume.store(f32::to_bits(track.volume), std::sync::atomic::Ordering::Release);
                         handle.pan.store(f32::to_bits(track.pan), std::sync::atomic::Ordering::Release);
                         handle.mute.store(track.mute, std::sync::atomic::Ordering::Release);
@@ -114,6 +118,48 @@ impl AppCoordinator {
                                     handle.add_clip(ch);
                                 }
                             }
+                        }
+                        handle.automation_lanes = track.automation_lanes.clone();
+                        for serialized in &track.fx_chain {
+                            let instance = match &serialized.effect_type {
+                                crate::audio::effects::dsp_effect::EffectType::Clap { plugin_id, path } => {
+                                    match crate::audio::clap_effect::ClapEffectAdapter::new_instance(plugin_id, std::path::Path::new(path), sr) {
+                                        Ok(adapter) => {
+                                            let inst = crate::audio::effects::dsp_effect::EffectInstance::new_clap(
+                                                serialized.name.clone(), serialized.effect_type.clone(), adapter,
+                                            );
+                                            inst.set_bypass(serialized.bypass);
+                                            inst
+                                        }
+                                        Err(e) => {
+                                            tracing::error!("Failed to recreate CLAP effect {}: {}", plugin_id, e);
+                                            let effect = crate::audio::effects::create_effect(crate::audio::effects::dsp_effect::EffectType::Gain);
+                                            let inst = crate::audio::effects::dsp_effect::EffectInstance::new_builtin(
+                                                serialized.name.clone(), serialized.effect_type.clone(), effect,
+                                            );
+                                            inst.set_bypass(serialized.bypass);
+                                            inst
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    let effect = crate::audio::effects::create_effect(serialized.effect_type.clone());
+                                    for (i, val) in serialized.param_values.iter().enumerate() {
+                                        if let Some(info) = effect.parameter_info().get(i) {
+                                            effect.set_parameter(info.id, *val);
+                                        }
+                                    }
+                                    let inst = crate::audio::effects::dsp_effect::EffectInstance::new_builtin(
+                                        serialized.name.clone(), serialized.effect_type.clone(), effect,
+                                    );
+                                    inst.set_bypass(serialized.bypass);
+                                    inst
+                                }
+                            };
+                            handle.fx_chain.push(instance);
+                        }
+                        for send_def in &track.sends {
+                            handle.sends.push(crate::project::track::SendSlot::new(send_def.target_id, send_def.level, send_def.pre_fader));
                         }
                         let idx = (*track_index).min(tracks.len());
                         tracks.insert(idx, handle);
@@ -162,11 +208,19 @@ impl AppCoordinator {
             if let Some(cmd) = self.undo_service.stack.redo() {
                 match cmd {
                     UndoCommand::AddTrack { track_index, track, track_ui: track_ui_snap, .. } => {
-                        let handle = crate::project::track::TrackHandle::new();
+                        let mut handle = crate::project::track::TrackHandle::new();
+                        handle.id = track.id;
+                        handle.parent_group = track.parent_group;
+                        handle.is_group = track.is_group;
+                        handle.is_return = track.is_return;
                         handle.volume.store(f32::to_bits(track.volume), std::sync::atomic::Ordering::Release);
                         handle.pan.store(f32::to_bits(track.pan), std::sync::atomic::Ordering::Release);
                         handle.mute.store(track.mute, std::sync::atomic::Ordering::Release);
                         handle.solo.store(track.solo, std::sync::atomic::Ordering::Release);
+                        handle.automation_lanes = track.automation_lanes.clone();
+                        for send_def in &track.sends {
+                            handle.sends.push(crate::project::track::SendSlot::new(send_def.target_id, send_def.level, send_def.pre_fader));
+                        }
                         let idx = (*track_index).min(tracks.len());
                         tracks.insert(idx, handle);
                         self.project.tracks.insert(idx, track.clone());
@@ -202,10 +256,18 @@ impl AppCoordinator {
                             let track = &snap.track;
                             let track_ui_snap = &snap.track_ui;
                             let mut handle = crate::project::track::TrackHandle::new();
+                            handle.id = track.id;
+                            handle.parent_group = track.parent_group;
+                            handle.is_group = track.is_group;
+                            handle.is_return = track.is_return;
                             handle.volume.store(f32::to_bits(track.volume), std::sync::atomic::Ordering::Release);
                             handle.pan.store(f32::to_bits(track.pan), std::sync::atomic::Ordering::Release);
                             handle.mute.store(track.mute, std::sync::atomic::Ordering::Release);
                             handle.solo.store(track.solo, std::sync::atomic::Ordering::Release);
+                            handle.automation_lanes = track.automation_lanes.clone();
+                            for send_def in &track.sends {
+                                handle.sends.push(crate::project::track::SendSlot::new(send_def.target_id, send_def.level, send_def.pre_fader));
+                            }
                             for clip_kind in &track.clips {
                                 match clip_kind {
                                     crate::project::clip::ClipKind::Audio(audio_clip) => {
@@ -236,16 +298,26 @@ impl AppCoordinator {
                             track_ui.insert(idx, track_ui_snap.clone());
                         }
                     }
-                    UndoCommand::RecordAudio { track_indices, clip_ids } => {
+                    UndoCommand::RecordAudio { track_indices, clip_ids, clip_kind } => {
+                        let r_samples = match clip_kind {
+                            crate::project::clip::ClipKind::Audio(ref a) => {
+                                a.buffer.as_ref().map(|buf| ((**buf.samples()).clone(), buf.channels(), buf.sample_rate()))
+                            }
+                            _ => None,
+                        };
+                        let Some((ref r_samples, channels, sr)) = r_samples else { return };
                         for (ti, cid) in track_indices.iter().zip(clip_ids.iter()) {
                             if let Some(track) = tracks.get_mut(*ti) {
-                                track.clips.retain(|c| c.clip_id != *cid);
+                                let ch = crate::project::clip_handle::ClipHandle::new(*cid, r_samples.clone(), channels, sr);
+                                ch.set_position(0);
+                                ch.set_length(r_samples.len() as u64 / channels as u64);
+                                track.add_clip(ch);
                             }
                             if let Some(pt) = self.project.tracks.get_mut(*ti) {
-                                pt.clips.pop();
+                                pt.add_clip(clip_kind.clone());
                             }
-                            self.project.audio_pool.pop();
                         }
+                        self.project.audio_pool.push(crate::project::pool::PoolClip::from_clip(clip_kind.clone()));
                     }
                     _ => crate::app::undo::apply_redo(&mut self.project, &mut tracks, cmd, sr),
                 }

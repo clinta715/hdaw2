@@ -114,6 +114,9 @@ pub fn handle_pending_requests(app: &mut HdawApp, ctx: &egui::Context) {
         app.play_requested = false;
     }
     if app.pause_requested {
+        if app.recording {
+            app.finish_recording();
+        }
         app.pause();
         app.pause_requested = false;
     }
@@ -123,9 +126,6 @@ pub fn handle_pending_requests(app: &mut HdawApp, ctx: &egui::Context) {
         }
         app.stop();
         app.stop_requested = false;
-    }
-    if app.pause_requested && app.recording {
-        app.finish_recording();
     }
     if app.seek_requested {
         app.engine.transport.seek_to_frame(app.seek_frame);

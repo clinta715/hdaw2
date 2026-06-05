@@ -11,8 +11,9 @@ impl HdawApp {
         let pool_idx = self.project.audio_pool.iter()
             .position(|p| p.id == pool_clip_id);
         let pool_clip = match pool_idx {
-            Some(idx) => self.project.audio_pool.remove(idx),
-            None => return,
+            Some(idx) if idx < self.project.audio_pool.len() && self.project.audio_pool[idx].id == pool_clip_id
+                => self.project.audio_pool.remove(idx),
+            _ => return,
         };
 
         let (buffer, clip_id) = match &pool_clip.clip {

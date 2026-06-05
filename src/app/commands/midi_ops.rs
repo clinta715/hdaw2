@@ -179,10 +179,6 @@ impl HdawApp {
             }
         }
 
-        if let Some(tui) = self.track_ui.get_mut(track_index) {
-            tui.color = [0x2a, 0x1a, 0x3a];
-        }
-
         self.undo_service.push(UndoCommand::AddMidiClip {
             track_index,
             clip,

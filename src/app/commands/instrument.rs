@@ -107,13 +107,18 @@ impl HdawApp {
         };
         let instance = EffectInstance::new_clap(desc.name.clone(), etype.clone(), adapter);
 
+        let insert_at = old_inst_idx.unwrap_or(0);
         let effect_index;
         let serialized;
         if let Ok(mut ts) = self.engine.tracks.lock() {
             if let Some(t) = ts.get_mut(track_index) {
-                effect_index = t.fx_chain.len();
                 t.add_effect(instance);
-                let inst = t.fx_chain.last().unwrap();
+                let idx = t.fx_chain.len() - 1;
+                if idx != insert_at {
+                    t.fx_chain.swap(idx, insert_at);
+                }
+                effect_index = insert_at;
+                let inst = &t.fx_chain[insert_at];
                 let pv: Vec<f32> = inst.parameter_info().iter()
                     .map(|p| inst.parameter_value(p.id)).collect();
                 serialized = crate::project::track::SerializedEffect {

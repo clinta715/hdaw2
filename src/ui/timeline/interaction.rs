@@ -126,15 +126,23 @@ pub fn handle_drag_end_snap(response: &Response, app: &mut HdawApp) {
                 if app.timeline_state.snap_enabled {
                     new_pos = app.timeline_state.snap_frames_to_grid(new_pos, sr, bpm, &app.preferences, &app.project.markers);
                 }
+                let captured_clip = app.project.tracks.get(drag.original_track_index)
+                    .and_then(|t| t.clips.iter().find(|c| match c {
+                        ClipKind::Audio(a) => a.id == drag.clip_id,
+                        ClipKind::Midi(m) => m.id == drag.clip_id,
+                    }).cloned());
                 app.move_clip_to_track(drag.clip_id, drag.original_track_index, drag.track_index, new_pos);
                 if old_pos != new_pos || drag.original_track_index != drag.track_index {
-                    app.undo_service.push(crate::app::undo::UndoCommand::MoveClipToTrack {
-                        clip_id: drag.clip_id,
-                        old_track_index: drag.original_track_index,
-                        new_track_index: drag.track_index,
-                        old_position: old_pos,
-                        new_position: new_pos,
-                    });
+                    if let Some(clip) = captured_clip {
+                        app.undo_service.push(crate::app::undo::UndoCommand::MoveClipToTrack {
+                            clip_id: drag.clip_id,
+                            old_track_index: drag.original_track_index,
+                            new_track_index: drag.track_index,
+                            old_position: old_pos,
+                            new_position: new_pos,
+                            clip,
+                        });
+                    }
                 }
             } else if app.timeline_state.snap_enabled {
                 let sr = app.engine.transport.sample_rate();
@@ -343,13 +351,13 @@ pub fn handle_velocity_lane_interaction(response: &Response, ui: &Ui, rect: &Rec
         }
     }
 
-    let Some((_ci, ni, _nf, dist)) = best else { return };
+    let Some((ci, ni, _nf, dist)) = best else { return };
     let hit_threshold = (sr_f as f64 / pps * 4.0) as u64;
     if dist as u64 > hit_threshold { return; }
 
     // Find the MIDI clip and note in project model
-    let Some((clip_id, clip)) = track.clips.iter().find_map(|c| match c {
-        ClipKind::Midi(m) if m.notes.len() > ni => Some((m.id, c)),
+    let Some((clip_id, clip)) = track.clips.iter().enumerate().find_map(|(idx, c)| match c {
+        ClipKind::Midi(m) if idx == ci && m.notes.len() > ni => Some((m.id, c)),
         _ => None,
     }) else { return };
 
