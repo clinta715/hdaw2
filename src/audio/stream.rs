@@ -21,10 +21,12 @@ thread_local! {
     static RETURN_ACCUM_R: RefCell<Vec<Vec<f32>>> = const { RefCell::new(Vec::new()) };
     static GROUP_IDXS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     static RETURN_IDXS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    static GROUP_TO_POS: RefCell<std::collections::HashMap<uuid::Uuid, usize>> = RefCell::new(std::collections::HashMap::new());
+    static RETURN_TO_POS: RefCell<std::collections::HashMap<uuid::Uuid, usize>> = RefCell::new(std::collections::HashMap::new());
     static UUID_TO_IDX: RefCell<std::collections::HashMap<uuid::Uuid, usize>> = RefCell::new(std::collections::HashMap::new());
     static IN_DEGREE: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     static CHILDREN: RefCell<Vec<Vec<usize>>> = const { RefCell::new(Vec::new()) };
-    static KAHN_QUEUE: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    static KAHN_QUEUE: RefCell<std::collections::VecDeque<usize>> = const { RefCell::new(std::collections::VecDeque::new()) };
     static METRONOME_SIN_TABLE: RefCell<Vec<f64>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -140,6 +142,8 @@ pub fn mix_tracks(
     RETURN_ACCUM_R.with(|rr| {
     GROUP_IDXS.with(|gi| {
     RETURN_IDXS.with(|ri| {
+    GROUP_TO_POS.with(|gtp| {
+    RETURN_TO_POS.with(|rtp| {
     UUID_TO_IDX.with(|ui| {
     let mut out_l = sl.borrow_mut();
     let mut out_r = sr.borrow_mut();
@@ -164,6 +168,20 @@ pub fn mix_tracks(
     }
     let n_groups = group_indices.len();
     let n_returns = return_indices.len();
+
+    let mut group_to_pos = gtp.borrow_mut();
+    group_to_pos.clear();
+    for (pos, &ti) in group_indices.iter().enumerate() {
+        group_to_pos.insert(track_list[ti].id, pos);
+    }
+    drop(group_to_pos);
+
+    let mut return_to_pos = rtp.borrow_mut();
+    return_to_pos.clear();
+    for (pos, &ti) in return_indices.iter().enumerate() {
+        return_to_pos.insert(track_list[ti].id, pos);
+    }
+    drop(return_to_pos);
 
     // Resize group accumulators
     let mut g_l = gl.borrow_mut();
@@ -222,8 +240,7 @@ pub fn mix_tracks(
             // Route post-fader signal
             let pg = track_list[i].parent_group;
             if let Some(pid) = pg {
-                if let Some(&gi_idx) = uuid_to_idx.get(&pid) {
-                    if let Ok(pos) = group_indices.binary_search(&gi_idx) {
+                if let Some(&pos) = gtp.borrow().get(&pid) {
                         let mut g_l = gl.borrow_mut();
                         let mut g_r = gr.borrow_mut();
                         for s in 0..frames {
@@ -231,7 +248,6 @@ pub fn mix_tracks(
                             g_r[pos][s] += mix_r[s];
                         }
                     }
-                }
             } else {
                 for s in 0..frames {
                     out_l[s] += mix_l[s];
@@ -243,19 +259,17 @@ pub fn mix_tracks(
             for send in &track_list[i].sends {
                 let send_level = f32::from_bits(send.level.load(Ordering::Acquire));
                 if send_level < 0.001 { continue; }
-                if let Some(&ri_idx) = uuid_to_idx.get(&send.target_id) {
-                    if let Ok(pos) = return_indices.binary_search(&ri_idx) {
-                        let (src_l, src_r) = if send.pre_fader {
-                            (&*pre_l, &*pre_r)
-                        } else {
-                            (&*mix_l, &*mix_r)
-                        };
-                        let mut r_l = rl.borrow_mut();
-                        let mut r_r = rr.borrow_mut();
-                        for s in 0..frames {
-                            r_l[pos][s] += src_l[s] * send_level;
-                            r_r[pos][s] += src_r[s] * send_level;
-                        }
+                if let Some(&pos) = rtp.borrow().get(&send.target_id) {
+                    let (src_l, src_r) = if send.pre_fader {
+                        (&*pre_l, &*pre_r)
+                    } else {
+                        (&*mix_l, &*mix_r)
+                    };
+                    let mut r_l = rl.borrow_mut();
+                    let mut r_r = rr.borrow_mut();
+                    for s in 0..frames {
+                        r_l[pos][s] += src_l[s] * send_level;
+                        r_r[pos][s] += src_r[s] * send_level;
                     }
                 }
             }
@@ -279,22 +293,20 @@ pub fn mix_tracks(
             let g_idx = group_indices[gi];
             let pg = track_list[g_idx].parent_group;
             if let Some(pid) = pg {
-                if let Some(&parent_ti) = uuid_to_idx.get(&pid) {
-                    if let Ok(parent_gi) = group_indices.binary_search(&parent_ti) {
-                        in_degree[parent_gi] += 1;
-                        children[gi].push(parent_gi);
-                    }
+                if let Some(&parent_gi) = gtp.borrow().get(&pid) {
+                    in_degree[parent_gi] += 1;
+                    children[gi].push(parent_gi);
                 }
             }
         }
         queue.clear();
         for gi in 0..n_groups {
             if in_degree[gi] == 0 {
-                queue.push(gi);
+                queue.push_back(gi);
             }
         }
         while !queue.is_empty() {
-            let gi = queue.remove(0);
+            let gi = queue.pop_front().unwrap();
             let g_idx = group_indices[gi];
             let muted = {
                 let h = &track_list[g_idx];
@@ -329,12 +341,10 @@ pub fn mix_tracks(
             let mut g_l = gl.borrow_mut();
             let mut g_r = gr.borrow_mut();
             if let Some(pid) = pg {
-                if let Some(&parent_ti) = uuid_to_idx.get(&pid) {
-                    if let Ok(parent_gi) = group_indices.binary_search(&parent_ti) {
-                        for s in 0..frames {
-                            g_l[parent_gi][s] += g_l[gi][s];
-                            g_r[parent_gi][s] += g_r[gi][s];
-                        }
+                if let Some(&parent_gi) = gtp.borrow().get(&pid) {
+                    for s in 0..frames {
+                        g_l[parent_gi][s] += g_l[gi][s];
+                        g_r[parent_gi][s] += g_r[gi][s];
                     }
                 }
             } else {
@@ -350,16 +360,14 @@ pub fn mix_tracks(
             for send in &track_list[g_idx].sends {
                 let send_level = f32::from_bits(send.level.load(Ordering::Acquire));
                 if send_level < 0.001 { continue; }
-                if let Some(&ri_idx) = uuid_to_idx.get(&send.target_id) {
-                    if let Ok(pos) = return_indices.binary_search(&ri_idx) {
-                        let mut r_l = rl.borrow_mut();
-                        let mut r_r = rr.borrow_mut();
-                        let g_l = gl.borrow();
-                        let g_r = gr.borrow();
-                        for s in 0..frames {
-                            r_l[pos][s] += g_l[gi][s] * send_level;
-                            r_r[pos][s] += g_r[gi][s] * send_level;
-                        }
+                if let Some(&pos) = rtp.borrow().get(&send.target_id) {
+                    let mut r_l = rl.borrow_mut();
+                    let mut r_r = rr.borrow_mut();
+                    let g_l = gl.borrow();
+                    let g_r = gr.borrow();
+                    for s in 0..frames {
+                        r_l[pos][s] += g_l[gi][s] * send_level;
+                        r_r[pos][s] += g_r[gi][s] * send_level;
                     }
                 }
             }
@@ -368,7 +376,7 @@ pub fn mix_tracks(
             for &parent_gi in &children[gi] {
                 in_degree[parent_gi] = in_degree[parent_gi].saturating_sub(1);
                 if in_degree[parent_gi] == 0 && !queue.contains(&parent_gi) {
-                    queue.push(parent_gi);
+                    queue.push_back(parent_gi);
                 }
             }
         }
@@ -468,7 +476,7 @@ pub fn mix_tracks(
             }
         }
     }
-    });});});});});});});});});
+    });});});});});});});});});});});
 }
 
 #[cfg(windows)]
