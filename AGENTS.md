@@ -1,5 +1,17 @@
 # HDAW Architecture Guide for AI Agents
 
+## v0.9.1 Changes (Mixer Panel Layout Fixes)
+
+### Mixer Panel Feedback Loop (Root Cause + Fix)
+- **Removed `ui.centered_and_justified(...)`** from `draw_master` and `draw_channel` — this call expanded label frames to fill available height, driving a feedback loop that grew the bottom panel to fill the entire window. Replaced with plain `ui.label(...)` or `ui.horizontal(|ui| { ui.add_space(pad); ui.label(...) })`.
+- **Constrained vertical sliders** with `add_sized(vec2(w, 120.0), ...)` in `draw_master` and `draw_channel` — `Slider::vertical()` uses `available_height()` and feeds the same feedback loop.
+- See **"Common egui Layout Pitfalls"** section below for the full diagnostic story (5 pitfalls + quick sanity check for new panels).
+
+### Other Fixes
+- **Export dialog on every startup**: Added guard `if app.export_dialog.is_none() && !app.exporting && app.export_done_message.is_none() { return; }` to `render_export_dialog`. Dialog now only appears when triggered from the File menu.
+- **Removed drift correction hacks** in `bottom_panel.rs` and `right_panel.rs` — they masked layout bugs and saved wrong values to prefs.
+- **Panel size clamp on load** (`preferences_state.rs`): Added `clamp_panel_sizes()` that clamps `mixer_panel_height` to `[160, 500]`, and `right_panel_width` / `effect_panel_width` to `[140, 600]`. Called from `prefs_io::load_preferences()`. Safety net for legacy bloated values from the old drift correction bug.
+
 ## v0.9.0 Changes (Tiled Layout + Loop/Panel Persistence)
 
 ### Tiled Layout (Ableton Live-style)
@@ -22,6 +34,9 @@
 ### Bug Fixes
 - **Empty project save prompt**: Added `mark_saved()` after `add_blank_track()` in `HdawApp::new()`.
 - **Piano roll window growth**: Cached `initial_window_size` via `get_or_insert_with()`, added `.min_size(400, 300)`.
+- **Export dialog on every startup**: `render_export_dialog` had no guard — it always showed the window regardless of `app.export_dialog` state. Added early return matching the pattern in `render_unsaved_dialog`: `if app.export_dialog.is_none() && !app.exporting && app.export_done_message.is_none() { return; }`. The dialog now only appears when triggered from the File menu.
+- **Panel size clamp on load** (`preferences_state.rs`): Added `clamp_panel_sizes()` that clamps `mixer_panel_height` to `[160, 500]`, and `right_panel_width` / `effect_panel_width` to `[140, 600]`. Called from `prefs_io::load_preferences()`. Safety net for legacy bloated values from the old drift correction bug.
+- **Mixer panel feedback loop** (`bottom_panel.rs`): Removed all `ui.centered_and_justified(...)` calls in `draw_master` and `draw_channel` — they expanded label frames to fill available height, causing the panel to grow until it filled the window. See "Common egui Layout Pitfalls" below for full details.
 
 ## v0.8.0 Changes (Expanded Track View + Audio Engine Performance)
 
@@ -129,6 +144,95 @@ Two parallel data models must be manually kept in sync:
 | `dsp/biquad.rs` | ~89 | Shared biquad filter math |
 | `project/` | ~300 | Project/Track/Clip/ClipHandle/MidiNote/MidiClip/CCEvent/Automation/Marker/Pool |
 | `tests/midi_pipeline_test.rs` | ~202 | MIDI→CLAP→audio integration tests |
+
+## Common egui Layout Pitfalls (Critical — Read Before Touching Panels)
+
+The mixer panel debugging saga in v0.9.0 uncovered several non-obvious egui 0.30 behaviors that cause **panel growth feedback loops**. Any agent modifying panel rendering must understand these.
+
+### Pitfall 1: `Ui::centered_and_justified` Expands Frames to Fill Available Height
+
+**The trap:** `ui.centered_and_justified(|ui| { ui.label(...) })` looks like a simple way to center a label. It is not. It creates a child layout with `main_justify: true` and `cross_justify: true`. In `Layout::advance_after_rects`:
+
+```rust
+if (self.is_horizontal() && self.vertical_align() == Align::Center) || self.vertical_justify() {
+    frame_size.y = frame_size.y.max(available_rect.height());
+}
+```
+
+The label's frame is expanded to `max(label_height, available_height)`. The label text sits at the top of that frame, but `min_rect` reflects the full frame height. In a vertical `ScrollArea`'s content with `auto_shrink([_, true])`, this drives `content_size.y` → `inner_size.y` → panel height.
+
+**Symptom:** Labels appear vertically spaced ("Master" at top, "Track 1" about an inch below) even though the layout is horizontal. The panel grows until it fills the window.
+
+**Fix:** Never use `centered_and_justified` for labels inside auto-sizing containers. Use:
+- `ui.label(...)` — natural height, left-aligned
+- `ui.horizontal(|ui| { ui.add_space(pad); ui.label(...) })` — manual horizontal centering, natural height
+- `ui.with_layout(Layout::top_down(Align::Center), |ui| { ui.label(...) })` — horizontal alignment only, no vertical justify
+
+**Locations fixed:** `draw_master` (Master label, dB value), `draw_channel` (track name).
+
+### Pitfall 2: `Slider::vertical()` Fills Available Height
+
+**The trap:** `ui.add(Slider::new(...).vertical())` uses `ui.available_height()` for the slider's height. In a `ScrollArea::horizontal()` with `auto_shrink([_, true])`, the Y axis follows content size, and the content's available height comes from the panel. The slider grows → content grows → panel grows.
+
+**Fix:** Always use `add_sized` for vertical sliders:
+```rust
+ui.add_sized(
+    egui::vec2(ui.available_width(), 120.0),
+    Slider::new(&mut vol, 0.0..=1.0).vertical().show_value(false),
+);
+```
+
+The fixed 120px height breaks the feedback loop. Trade-off: the slider doesn't grow when the user resizes the panel larger. Acceptable for now; can be made dynamic later with `ui.available_height().clamp(80.0, 200.0)`.
+
+**Locations fixed:** `draw_master`, `draw_channel`.
+
+### Pitfall 3: `auto_shrink` on a Non-Scrolling Axis ALWAYS Follows Content
+
+**The trap:** For `ScrollArea::horizontal()`, the Y axis has scrolling disabled. In egui 0.30's `scroll_area.rs:930-935`:
+
+```rust
+(false, true)  => content_size[d],  // Follow the content (expand/contract)
+(false, false) => inner_size[d].max(content_size[d]),  // Expand to fit content
+```
+
+**Both** values expand the ScrollArea to fit content height. The only difference is whether they also shrink when content is smaller. There is no option to have the Y viewport be independent of content.
+
+**Implication:** You cannot prevent a `ScrollArea::horizontal()` from driving the panel height via content. The fix must be in the CONTENT — make the content's `min_rect` match the desired height by:
+1. Using fixed-size widgets (`add_sized` for sliders)
+2. Avoiding `centered_and_justified` (Pitfall 1)
+3. Using `ui.allocate_ui(vec2(w, h), ...)` or `allocate_ui_at_rect` for manual positioning
+
+### Pitfall 4: The Drift Correction Hack Masks Layout Bugs
+
+**The trap:** The original code had a "drift correction" that read `PanelState` after `panel.show()` and reset the height if it grew too much. This appeared to work but had a critical bug: it read `post_state` (the bloated value) before overwriting it, so it saved the wrong height to preferences.
+
+**Symptom:** On restart, the panel loaded a huge `mixer_panel_height` (e.g. 1088.0) from prefs and started at that height. The feedback loop (Pitfall 1 + 2) then made it grow further.
+
+**Fix:** Remove the drift correction entirely. Fix the layout bugs (Pitfalls 1-3) so the feedback loop doesn't exist. Add a clamp in `prefs_io::load_preferences()` (`clamp_panel_sizes()`) as a safety net for any legacy bloated values.
+
+### Pitfall 5: `Ui::min_rect` Cannot Be Constrained via Public API
+
+**The trap:** `Ui::min_rect` is a public field in egui 0.30, but the `Placer::force_set_min_rect` method is `pub(crate)`. You cannot set `min_rect` from outside the crate. `Ui::set_max_height()` constrains the layout but does not affect the `min_rect` reported to the parent.
+
+**Workaround:** Use `allocate_exact_size` at the end of the closure to claim a specific size — but this ADDS to min_rect, doesn't constrain it. The real fix is to make the content naturally have the desired height (Pitfalls 1-2).
+
+### Diagnostic Steps for Panel Growth Issues
+
+If a panel grows to fill the window:
+1. Add an `eprintln!` logging `panel_res.response.rect.height()` before and after `panel.show()`.
+2. Check for `centered_and_justified` calls inside the content — these are the #1 cause.
+3. Check for `Slider::vertical()` or other widgets that use `available_height()`.
+4. Add `ui.add_sized(..., fixed_height)` to constrain suspect widgets.
+5. Verify `mixer_panel_height` / `right_panel_width` in `%APPDATA%/hdaw/preferences.ron` — if huge, the drift bug left a poisoned value (run `clamp_panel_sizes()` on load).
+
+### Quick Sanity Check for New Panels
+
+Before writing a new panel rendering, ask:
+- Does any widget use `available_height()` as its size? (vertical sliders, `centered_and_justified`, `allocate_exact_size` with `available_width()` only)
+- Does the panel content need to be clipped to a fixed area?
+- If the panel should be user-resizable, does the content's natural height stay bounded when the panel is made very large?
+
+If any answer is "yes" or "unsure", use `add_sized` or manual `allocate_ui` with explicit heights.
 
 ## Common Patterns to Follow
 

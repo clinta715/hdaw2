@@ -33,5 +33,7 @@ pub fn load_preferences() -> Option<PreferencesState> {
         return None;
     }
     let data = fs::read_to_string(&path).ok()?;
-    ron::from_str(&data).ok()
+    let mut prefs: PreferencesState = ron::from_str(&data).ok()?;
+    prefs.clamp_panel_sizes();
+    Some(prefs)
 }

@@ -2,56 +2,43 @@ use crate::app::{HdawApp, RightPanelMode};
 use egui::{Color32, Context, RichText};
 
 pub fn render(ctx: &Context, app: &mut HdawApp) {
-    let panel_res = egui::SidePanel::right("right_panel")
+    let panel = egui::SidePanel::right("right_panel")
         .resizable(true)
-        .default_width(app.preferences.right_panel_width)
         .min_width(140.0)
-        .show(ctx, |ui| {
-            ui.vertical(|ui| {
-                // Tabs
-                ui.horizontal(|ui| {
-                    for (mode, label) in &[
-                        (RightPanelMode::Browser, "Browser"),
-                        (RightPanelMode::ClipInfo, "Clip"),
-                        (RightPanelMode::EffectDetail, "FX"),
-                    ] {
-                        let selected = app.right_panel_mode == *mode;
-                        if ui.selectable_label(selected, *label).clicked() {
-                            app.right_panel_mode = *mode;
-                        }
-                    }
-                });
-                ui.separator();
+        .default_width(app.preferences.right_panel_width);
 
-                match app.right_panel_mode {
-                    RightPanelMode::Browser => render_browser(ui, app),
-                    RightPanelMode::ClipInfo => render_clip_info(ui, app),
-                    RightPanelMode::EffectDetail => render_effect_detail(ui, app),
+    let panel_res = panel.show(ctx, |ui| {
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                for (mode, label) in &[
+                    (RightPanelMode::Browser, "Browser"),
+                    (RightPanelMode::ClipInfo, "Clip"),
+                    (RightPanelMode::EffectDetail, "FX"),
+                ] {
+                    let selected = app.right_panel_mode == *mode;
+                    if ui.selectable_label(selected, *label).clicked() {
+                        app.right_panel_mode = *mode;
+                    }
                 }
             });
+            ui.separator();
+
+            match app.right_panel_mode {
+                RightPanelMode::Browser => render_browser(ui, app),
+                RightPanelMode::ClipInfo => render_clip_info(ui, app),
+                RightPanelMode::EffectDetail => render_effect_detail(ui, app),
+            }
         });
-    app.preferences.right_panel_width = panel_res.response.rect.width();
+    });
+
+    let response_width = panel_res.response.rect.width();
+    if response_width.is_finite() && (response_width - app.preferences.right_panel_width).abs() > 1.0 {
+        app.preferences.right_panel_width = response_width;
+    }
 }
 
 fn render_browser(ui: &mut egui::Ui, app: &mut HdawApp) {
-    ui.label(RichText::new("Audio Pool").strong().size(11.0));
-    ui.add_space(4.0);
-
-    let pool = app.project.audio_pool.clone();
-    if pool.is_empty() {
-        ui.label("No imported clips.");
-        return;
-    }
-
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        for entry in &pool {
-            let name = match &entry.clip {
-                crate::project::clip::ClipKind::Audio(a) => a.name.clone(),
-                crate::project::clip::ClipKind::Midi(m) => m.name.clone(),
-            };
-            ui.label(RichText::new(name).size(10.0).color(Color32::from_gray(200)));
-        }
-    });
+    crate::ui::sample_browser::render(ui, app);
 }
 
 fn render_clip_info(ui: &mut egui::Ui, app: &mut HdawApp) {
@@ -63,7 +50,6 @@ fn render_clip_info(ui: &mut egui::Ui, app: &mut HdawApp) {
         }
     };
 
-    // Find the clip
     for t in &app.project.tracks {
         for c in &t.clips {
             match c {
@@ -97,7 +83,6 @@ fn render_effect_detail(ui: &mut egui::Ui, app: &mut HdawApp) {
         }
     };
 
-    // Show FX chain for the selected track
     if let Ok(tracks) = app.engine.tracks.lock() {
         if let Some(track) = tracks.get(track_idx) {
             if track.fx_chain.is_empty() {

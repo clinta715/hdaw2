@@ -7,12 +7,12 @@ const CHANNEL_WIDTH: f32 = 70.0;
 const BOTTOM_MIN_HEIGHT: f32 = 160.0;
 const METER_HEIGHT: f32 = 40.0;
 
-pub struct MixerPanelState {
+pub struct BottomPanelState {
     pub master_volume: f32,
     pub visible: bool,
 }
 
-impl Default for MixerPanelState {
+impl Default for BottomPanelState {
     fn default() -> Self {
         Self {
             master_volume: 1.0,
@@ -22,16 +22,18 @@ impl Default for MixerPanelState {
 }
 
 pub fn render(ctx: &Context, app: &mut HdawApp) {
-    if !app.mixer_state.visible {
+    if !app.bottom_panel_state.visible {
         return;
     }
-    let panel_res = egui::TopBottomPanel::bottom("bottom_panel")
+
+    let mut panel = egui::TopBottomPanel::bottom("bottom_panel")
         .resizable(true)
-        .default_height(app.preferences.mixer_panel_height)
-        .min_height(BOTTOM_MIN_HEIGHT)
-        .show(ctx, |ui| {
+        .min_height(BOTTOM_MIN_HEIGHT);
+
+    panel = panel.default_height(app.preferences.mixer_panel_height);
+
+    let panel_res = panel.show(ctx, |ui| {
             ui.vertical(|ui| {
-                // Mode tabs
                 ui.horizontal(|ui| {
                     for (mode, label) in &[
                         (BottomPanelMode::Mixer, "Mixer"),
@@ -53,50 +55,53 @@ pub fn render(ctx: &Context, app: &mut HdawApp) {
                 }
             });
         });
-    app.preferences.mixer_panel_height = panel_res.response.rect.height();
+
+    let response_height = panel_res.response.rect.height();
+    if response_height.is_finite() && (response_height - app.preferences.mixer_panel_height).abs() > 1.0 {
+        app.preferences.mixer_panel_height = response_height;
+    }
 }
 
 fn render_mixer(ui: &mut egui::Ui, app: &mut HdawApp) {
-    ui.add_space(2.0);
     egui::ScrollArea::horizontal()
-        .auto_shrink([false, false])
+        .id_salt("mixer_scroll")
+        .auto_shrink([false, true])
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_top(|ui| {
                 let mv = app.master_volume();
-                let new_mv = draw_master(ui, &mut app.mixer_state, mv);
+                let new_mv = draw_master(ui, &mut app.bottom_panel_state, mv);
                 if (new_mv - mv).abs() > 0.001 {
                     app.set_master_volume(new_mv);
                 }
-                ui.separator();
+                ui.add_space(4.0);
                 let all_tracks = app.track_ui.clone();
                 for i in 0..all_tracks.len() {
                     draw_channel(ui, i, app, &all_tracks);
-                    ui.separator();
+                    ui.add_space(4.0);
                 }
             });
         });
 }
 
-fn draw_master(ui: &mut egui::Ui, state: &mut MixerPanelState, initial_vol: f32) -> f32 {
+fn draw_master(ui: &mut egui::Ui, state: &mut BottomPanelState, initial_vol: f32) -> f32 {
     state.master_volume = initial_vol;
     ui.vertical(|ui| {
         ui.set_width(CHANNEL_WIDTH);
 
-        ui.centered_and_justified(|ui| {
-            ui.label(RichText::new("Master").strong().size(11.0));
-        });
+        ui.label(RichText::new("Master").strong().size(11.0));
 
         let mw = CHANNEL_WIDTH - 12.0;
         let (meter_rect, _) = ui.allocate_exact_size(egui::vec2(mw, METER_HEIGHT), egui::Sense::hover());
         draw_vu_meter(ui, meter_rect, state.master_volume, false);
 
-        ui.add(Slider::new(&mut state.master_volume, 0.0..=1.0)
-            .vertical()
-            .show_value(false));
+        ui.add_sized(
+            egui::vec2(ui.available_width(), 120.0),
+            Slider::new(&mut state.master_volume, 0.0..=1.0)
+                .vertical()
+                .show_value(false),
+        );
 
-        ui.centered_and_justified(|ui| {
-            ui.label(format!("{:.1} dB", 20.0 * state.master_volume.max(0.0001).log10()));
-        });
+        ui.label(format!("{:.1} dB", 20.0 * state.master_volume.max(0.0001).log10()));
     });
     state.master_volume
 }
@@ -118,20 +123,22 @@ fn draw_channel(ui: &mut egui::Ui, index: usize, app: &mut HdawApp, all_tracks: 
     ui.vertical(|ui| {
         ui.set_width(CHANNEL_WIDTH);
 
-        // 1. Track name
-        ui.centered_and_justified(|ui| {
+        ui.horizontal(|ui| {
+            let pad = (CHANNEL_WIDTH * 0.5 - 4.0).max(0.0);
+            ui.add_space(pad);
             ui.label(RichText::new(&tui.name).size(10.0).color(color));
         });
 
-        // 2. VU Meter
         let mw = CHANNEL_WIDTH - 12.0;
         let (meter_rect, _) = ui.allocate_exact_size(egui::vec2(mw, METER_HEIGHT), egui::Sense::hover());
         draw_vu_meter(ui, meter_rect, peak, muted);
 
-        // 3. Volume fader
-        let response = ui.add(Slider::new(&mut vol, 0.0..=1.0)
-            .vertical()
-            .show_value(false));
+        let response = ui.add_sized(
+            egui::vec2(ui.available_width(), 120.0),
+            Slider::new(&mut vol, 0.0..=1.0)
+                .vertical()
+                .show_value(false),
+        );
         if response.changed() {
             app.track_ui[index].volume.store(vol.to_bits(), Ordering::Release);
             if let Some(track) = app.project.tracks.get_mut(index) {
@@ -139,7 +146,6 @@ fn draw_channel(ui: &mut egui::Ui, index: usize, app: &mut HdawApp, all_tracks: 
             }
         }
 
-        // 4. Mute / Solo / Volume row
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(2.0, 0.0);
@@ -161,7 +167,6 @@ fn draw_channel(ui: &mut egui::Ui, index: usize, app: &mut HdawApp, all_tracks: 
             });
         });
 
-        // 5. Route dropdown
         if !is_group && !is_return {
             ui.add_space(2.0);
             let groups: Vec<(Uuid, String)> = all_tracks.iter()
@@ -189,7 +194,6 @@ fn draw_channel(ui: &mut egui::Ui, index: usize, app: &mut HdawApp, all_tracks: 
             });
         }
 
-        // 6. Sends section
         if send_levels_count > 0 {
             ui.add_space(2.0);
             ui.label(RichText::new("Sends").small().color(Color32::from_gray(160)));
@@ -228,14 +232,12 @@ fn render_sends(ui: &mut egui::Ui, app: &mut HdawApp) {
             .striped(true)
             .min_col_width(60.0)
             .show(ui, |grid| {
-                // Header
                 grid.colored_label(Color32::WHITE, "Track");
                 for (_, rn) in &returns {
                     grid.colored_label(Color32::WHITE, rn);
                 }
                 grid.end_row();
 
-                // Rows
                 for ti in 0..app.track_ui.len() {
                     let is_return = app.track_ui[ti].is_return;
                     if is_return { continue; }
